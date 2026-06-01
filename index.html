@@ -1,1 +1,995 @@
 
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Orbit — Social Galaxy Visualizer</title>
+
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Space+Mono:ital,wght@0,400;0,700;1,400&family=Outfit:wght@300;400;500;600;700&display=swap" rel="stylesheet" />
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/d3/7.8.5/d3.min.js"></script>
+
+<style>
+  /* ─── CSS Custom Properties ─── */
+  :root {
+    --bg:           #03040a;
+    --bg2:          #070b18;
+    --sun-core:     #fff7e0;
+    --sun-mid:      #ffd060;
+    --sun-outer:    #ff8c00;
+    --sun-corona:   #ff4500;
+    --accent:       #7eb8ff;
+    --accent2:      #b48cff;
+    --orbit-line:   rgba(130,170,255,0.13);
+    --orbit-hover:  rgba(130,170,255,0.35);
+    --card-bg:      rgba(8, 14, 34, 0.82);
+    --card-border:  rgba(126, 184, 255, 0.22);
+    --text-primary: #e8efff;
+    --text-muted:   rgba(200,215,255,0.55);
+    --font-display: 'Space Mono', monospace;
+    --font-body:    'Outfit', sans-serif;
+  }
+
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  html, body {
+    width: 100%; height: 100%;
+    background: var(--bg);
+    color: var(--text-primary);
+    font-family: var(--font-body);
+    overflow: hidden;
+    user-select: none;
+  }
+
+  /* ─── Starfield Canvas ─── */
+  #starfield {
+    position: fixed;
+    inset: 0;
+    pointer-events: none;
+    z-index: 0;
+  }
+
+  /* ─── Main SVG ─── */
+  #galaxy {
+    position: fixed;
+    inset: 0;
+    width: 100%; height: 100%;
+    z-index: 1;
+    cursor: grab;
+  }
+  #galaxy:active { cursor: grabbing; }
+
+  /* ─── Orbit rings ─── */
+  .orbit-ring {
+    fill: none;
+    stroke: var(--orbit-line);
+    stroke-width: 1;
+    stroke-dasharray: 4 8;
+    transition: stroke 0.3s;
+    animation: dash-rotate 80s linear infinite;
+  }
+  .orbit-ring:hover { stroke: var(--orbit-hover); }
+
+  @keyframes dash-rotate {
+    to { stroke-dashoffset: -200; }
+  }
+
+  /* ─── Sun group ─── */
+  .sun-corona {
+    fill: radial-gradient(circle, var(--sun-core), transparent);
+    animation: corona-pulse 3s ease-in-out infinite alternate;
+  }
+  @keyframes corona-pulse {
+    from { opacity: 0.6; r: 38px; }
+    to   { opacity: 1.0; r: 46px; }
+  }
+  .sun-rays {
+    animation: rays-spin 20s linear infinite;
+    transform-origin: center;
+  }
+
+  /* ─── Planet nodes ─── */
+  .planet-group { cursor: pointer; }
+  .planet-clip { clip-path: url(#planetClip); }
+
+  .planet-ring {
+    fill: none;
+    stroke-width: 2.5;
+    transition: stroke-width 0.2s, r 0.2s;
+  }
+  .planet-group:hover .planet-ring {
+    stroke-width: 3.5;
+  }
+  .planet-img {
+    transition: transform 0.25s cubic-bezier(.34,1.56,.64,1);
+  }
+  .planet-group:hover .planet-img {
+    transform: scale(1.18);
+  }
+  .planet-glow {
+    opacity: 0;
+    transition: opacity 0.25s;
+    pointer-events: none;
+  }
+  .planet-group:hover .planet-glow { opacity: 1; }
+
+  /* ─── Tooltip Card ─── */
+  #tooltip {
+    position: fixed;
+    z-index: 100;
+    pointer-events: none;
+    opacity: 0;
+    transform: translateY(8px) scale(0.97);
+    transition: opacity 0.2s ease, transform 0.2s ease;
+    min-width: 220px;
+    max-width: 280px;
+  }
+  #tooltip.visible {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+    pointer-events: auto;
+  }
+  .tooltip-inner {
+    background: var(--card-bg);
+    border: 1px solid var(--card-border);
+    border-radius: 16px;
+    padding: 16px 18px;
+    backdrop-filter: blur(24px) saturate(180%);
+    -webkit-backdrop-filter: blur(24px) saturate(180%);
+    box-shadow:
+      0 8px 32px rgba(0,0,20,0.7),
+      0 0 0 1px rgba(126,184,255,0.06) inset,
+      0 1px 0 rgba(255,255,255,0.06) inset;
+  }
+  .tooltip-avatar {
+    width: 48px; height: 48px;
+    border-radius: 50%;
+    border: 2px solid var(--card-border);
+    object-fit: cover;
+    float: left;
+    margin-right: 12px;
+    margin-bottom: 4px;
+    background: var(--bg2);
+  }
+  .tooltip-name {
+    font-family: var(--font-body);
+    font-weight: 600;
+    font-size: 15px;
+    color: var(--text-primary);
+    line-height: 1.2;
+    margin-bottom: 2px;
+    word-break: break-word;
+  }
+  .tooltip-handle {
+    font-family: var(--font-display);
+    font-size: 11px;
+    color: var(--accent);
+    margin-bottom: 8px;
+  }
+  .tooltip-divider {
+    clear: both;
+    border: none;
+    border-top: 1px solid rgba(126,184,255,0.1);
+    margin: 10px 0;
+  }
+  .tooltip-meta {
+    font-size: 11.5px;
+    color: var(--text-muted);
+    margin-bottom: 6px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .tooltip-meta svg { flex-shrink: 0; opacity: 0.7; }
+  .tooltip-link {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    margin-top: 10px;
+    padding: 7px 14px;
+    background: rgba(126,184,255,0.1);
+    border: 1px solid rgba(126,184,255,0.2);
+    border-radius: 8px;
+    color: var(--accent);
+    font-size: 12px;
+    font-family: var(--font-display);
+    text-decoration: none;
+    transition: background 0.2s, border-color 0.2s;
+    pointer-events: auto;
+    cursor: pointer;
+  }
+  .tooltip-link:hover {
+    background: rgba(126,184,255,0.18);
+    border-color: rgba(126,184,255,0.4);
+  }
+
+  /* ─── HUD Panel ─── */
+  #hud {
+    position: fixed;
+    top: 20px; left: 50%;
+    transform: translateX(-50%);
+    z-index: 50;
+    display: flex;
+    align-items: center;
+    gap: 18px;
+    background: rgba(6, 10, 26, 0.75);
+    border: 1px solid rgba(126,184,255,0.15);
+    border-radius: 40px;
+    padding: 10px 24px;
+    backdrop-filter: blur(20px);
+    -webkit-backdrop-filter: blur(20px);
+    box-shadow: 0 4px 24px rgba(0,0,0,0.5);
+    white-space: nowrap;
+  }
+  #hud-title {
+    font-family: var(--font-display);
+    font-size: 13px;
+    font-weight: 700;
+    letter-spacing: 0.12em;
+    color: var(--sun-mid);
+    text-transform: uppercase;
+  }
+  #hud-sep { width: 1px; height: 18px; background: rgba(126,184,255,0.2); }
+  #hud-count {
+    font-family: var(--font-body);
+    font-size: 13px;
+    color: var(--text-muted);
+  }
+  #hud-count span {
+    color: var(--accent);
+    font-weight: 600;
+  }
+
+  /* ─── Controls ─── */
+  #controls {
+    position: fixed;
+    bottom: 28px; right: 24px;
+    z-index: 50;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .ctrl-btn {
+    width: 40px; height: 40px;
+    border-radius: 12px;
+    background: rgba(6,10,26,0.8);
+    border: 1px solid rgba(126,184,255,0.2);
+    color: var(--text-primary);
+    font-size: 18px;
+    display: flex; align-items: center; justify-content: center;
+    cursor: pointer;
+    backdrop-filter: blur(12px);
+    transition: background 0.2s, border-color 0.2s, transform 0.15s;
+  }
+  .ctrl-btn:hover {
+    background: rgba(126,184,255,0.12);
+    border-color: rgba(126,184,255,0.4);
+    transform: scale(1.08);
+  }
+  .ctrl-btn:active { transform: scale(0.95); }
+
+  /* ─── Legend ─── */
+  #legend {
+    position: fixed;
+    bottom: 28px; left: 24px;
+    z-index: 50;
+    background: rgba(6,10,26,0.75);
+    border: 1px solid rgba(126,184,255,0.12);
+    border-radius: 14px;
+    padding: 12px 16px;
+    backdrop-filter: blur(16px);
+    font-size: 11.5px;
+    color: var(--text-muted);
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .legend-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .legend-dot {
+    width: 10px; height: 10px;
+    border-radius: 50%;
+    flex-shrink: 0;
+  }
+
+  /* ─── Loading Screen ─── */
+  #loading {
+    position: fixed;
+    inset: 0;
+    z-index: 200;
+    background: var(--bg);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 24px;
+    transition: opacity 0.6s ease;
+  }
+  #loading.hidden { opacity: 0; pointer-events: none; }
+  .loader-sun {
+    width: 64px; height: 64px;
+    border-radius: 50%;
+    background: radial-gradient(circle at 40% 40%, var(--sun-core), var(--sun-mid) 40%, var(--sun-outer));
+    box-shadow:
+      0 0 30px 10px rgba(255,180,0,0.35),
+      0 0 80px 30px rgba(255,100,0,0.15);
+    animation: loader-pulse 1.5s ease-in-out infinite alternate;
+  }
+  @keyframes loader-pulse {
+    from { box-shadow: 0 0 30px 10px rgba(255,180,0,0.35), 0 0 80px 30px rgba(255,100,0,0.15); }
+    to   { box-shadow: 0 0 50px 20px rgba(255,180,0,0.55), 0 0 120px 50px rgba(255,100,0,0.25); }
+  }
+  #loading-text {
+    font-family: var(--font-display);
+    font-size: 13px;
+    letter-spacing: 0.15em;
+    color: var(--text-muted);
+    text-transform: uppercase;
+  }
+  #loading-sub {
+    font-family: var(--font-body);
+    font-size: 12px;
+    color: rgba(200,215,255,0.3);
+    text-align: center;
+    max-width: 260px;
+    line-height: 1.5;
+  }
+  .progress-bar {
+    width: 180px; height: 2px;
+    background: rgba(126,184,255,0.1);
+    border-radius: 2px;
+    overflow: hidden;
+  }
+  .progress-fill {
+    height: 100%;
+    background: linear-gradient(90deg, var(--accent2), var(--accent));
+    border-radius: 2px;
+    width: 0%;
+    transition: width 0.3s ease;
+  }
+
+  /* ─── Error State ─── */
+  #error-panel {
+    display: none;
+    position: fixed;
+    inset: 0;
+    z-index: 300;
+    background: var(--bg);
+    align-items: center;
+    justify-content: center;
+    flex-direction: column;
+    gap: 16px;
+    padding: 32px;
+    text-align: center;
+  }
+  #error-panel.show { display: flex; }
+  #error-panel h2 {
+    font-family: var(--font-display);
+    font-size: 18px;
+    color: #ff8080;
+  }
+  #error-panel p {
+    font-size: 14px;
+    color: var(--text-muted);
+    max-width: 420px;
+    line-height: 1.7;
+  }
+  #error-panel code {
+    background: rgba(255,255,255,0.07);
+    padding: 2px 6px;
+    border-radius: 4px;
+    font-family: var(--font-display);
+    font-size: 12px;
+  }
+
+  /* ─── Animate orbit nodes ─── */
+  .planet-orbit-path {
+    animation-name: orbit-spin;
+    animation-timing-function: linear;
+    animation-iteration-count: infinite;
+    transform-box: fill-box;
+    transform-origin: center;
+  }
+
+  /* ─── Responsive ─── */
+  @media (max-width: 600px) {
+    #hud { padding: 8px 16px; gap: 12px; }
+    #hud-title { font-size: 11px; }
+    #legend { display: none; }
+    .ctrl-btn { width: 36px; height: 36px; font-size: 16px; }
+  }
+</style>
+</head>
+<body>
+
+<!-- Starfield -->
+<canvas id="starfield"></canvas>
+
+<!-- Loading Screen -->
+<div id="loading">
+  <div class="loader-sun"></div>
+  <div id="loading-text">Mapping your galaxy…</div>
+  <div class="progress-bar"><div class="progress-fill" id="progress-fill"></div></div>
+  <div id="loading-sub">Loading follower data and rendering orbits</div>
+</div>
+
+<!-- Error Panel -->
+<div id="error-panel">
+  <h2>⚠ Could not load followers.json</h2>
+  <p>Make sure <code>followers.json</code> is placed in the <strong>same folder</strong> as <code>index.html</code> and you are serving the files via a local web server (e.g. <code>npx serve .</code> or VS Code Live Server).<br><br>Opening the HTML file directly via <code>file://</code> will block the fetch due to browser security policies.</p>
+  <p style="margin-top:8px; color: rgba(200,215,255,0.3); font-size:12px;">Check your browser console for more details.</p>
+</div>
+
+<!-- HUD -->
+<div id="hud" style="display:none;">
+  <span id="hud-title">✦ Orbit</span>
+  <div id="hud-sep"></div>
+  <span id="hud-count"><span id="follower-count">0</span> followers across <span id="orbit-count">0</span> rings</span>
+</div>
+
+<!-- Main SVG Canvas -->
+<svg id="galaxy"></svg>
+
+<!-- Tooltip -->
+<div id="tooltip">
+  <div class="tooltip-inner">
+    <img class="tooltip-avatar" id="tt-avatar" src="" alt="" />
+    <div class="tooltip-name" id="tt-name"></div>
+    <div class="tooltip-handle" id="tt-handle"></div>
+    <hr class="tooltip-divider" />
+    <div class="tooltip-meta">
+      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+      <span id="tt-date"></span>
+    </div>
+    <a class="tooltip-link" id="tt-link" href="#" target="_blank" rel="noopener noreferrer">
+      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M18 13v6a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
+      Open Profile
+    </a>
+  </div>
+</div>
+
+<!-- Controls -->
+<div id="controls">
+  <button class="ctrl-btn" id="btn-zoom-in"  title="Zoom In">+</button>
+  <button class="ctrl-btn" id="btn-zoom-out" title="Zoom Out">−</button>
+  <button class="ctrl-btn" id="btn-reset"    title="Reset View">⌖</button>
+  <button class="ctrl-btn" id="btn-pause"    title="Toggle Animation">⏸</button>
+</div>
+
+<!-- Legend -->
+<div id="legend">
+  <div style="font-family:var(--font-display);font-size:10px;letter-spacing:.1em;color:var(--text-primary);margin-bottom:4px;">ORBITS</div>
+  <div class="legend-row"><div class="legend-dot" style="background:#ffd060;box-shadow:0 0 6px #ffd060;"></div>Inner ring</div>
+  <div class="legend-row"><div class="legend-dot" style="background:#7eb8ff;"></div>Mid rings</div>
+  <div class="legend-row"><div class="legend-dot" style="background:#b48cff;"></div>Outer rings</div>
+  <div style="margin-top:6px;font-size:10.5px;">Scroll / pinch to zoom<br>Drag to pan</div>
+</div>
+
+<script>
+/* ═══════════════════════════════════════════════════════════
+   ORBIT — Social Galaxy Visualizer
+   ═══════════════════════════════════════════════════════════ */
+
+// ─── Config ───────────────────────────────────────────────
+const CONFIG = {
+  // The owner of the profile (center Sun)
+  ownerName:    "You",
+  ownerHandle:  "@you",
+  ownerAvatar:  "",  // Leave blank to use initials placeholder
+
+  // Solar system layout
+  sunRadius:         38,
+  firstOrbitRadius:  130,
+  orbitGap:          100,   // px between each ring
+  planetRadius:      22,    // avatar circle radius
+  minPlanetsPerRing: 4,
+  planetsPerRingFactor: 6.5, // circumference / factor = capacity
+
+  // Animation
+  baseOrbitDuration: 60,    // seconds for innermost ring
+  durationIncrement: 30,    // seconds added per ring outward
+
+  // Avatar fallback
+  avatarColors: [
+    '#7eb8ff','#b48cff','#ff8caa','#ffd060',
+    '#6effc8','#ff9f5a','#5af0ff','#e87bff'
+  ],
+};
+
+// ─── Colour scale per orbit ────────────────────────────────
+const ORBIT_COLORS = [
+  '#ffd060','#f0a030',
+  '#7eb8ff','#5aa0ff','#3d80ff',
+  '#b48cff','#9060e0','#7040c0',
+  '#6effc8','#3ed4a0',
+];
+
+// ─── Globals ──────────────────────────────────────────────
+let svgEl, zoom, gMain, gOrbits, gSun, gPlanets;
+let followers = [];
+let orbitData = [];
+let paused = false;
+let animFrameId;
+let startTime = null;
+let planetAngles = [];  // current angle per planet
+
+// ─── Starfield ────────────────────────────────────────────
+function initStarfield() {
+  const canvas = document.getElementById('starfield');
+  const ctx = canvas.getContext('2d');
+  let W, H, stars = [];
+
+  function resize() {
+    W = canvas.width  = window.innerWidth;
+    H = canvas.height = window.innerHeight;
+    stars = Array.from({length: 220}, () => ({
+      x: Math.random() * W,
+      y: Math.random() * H,
+      r: Math.random() * 1.4 + 0.2,
+      a: Math.random() * 0.7 + 0.1,
+      speed: Math.random() * 0.3 + 0.05,
+      phase: Math.random() * Math.PI * 2,
+    }));
+  }
+
+  function draw(t) {
+    ctx.clearRect(0, 0, W, H);
+    stars.forEach(s => {
+      const alpha = s.a * (0.6 + 0.4 * Math.sin(t * 0.001 * s.speed + s.phase));
+      ctx.beginPath();
+      ctx.arc(s.x, s.y, s.r, 0, Math.PI * 2);
+      ctx.fillStyle = `rgba(200,220,255,${alpha})`;
+      ctx.fill();
+    });
+    requestAnimationFrame(draw);
+  }
+
+  window.addEventListener('resize', resize);
+  resize();
+  requestAnimationFrame(draw);
+}
+
+// ─── Data helpers ─────────────────────────────────────────
+function decodeUnicode(str) {
+  if (!str) return '';
+  try {
+    return decodeURIComponent(
+      str.replace(/\\u([0-9a-fA-F]{4})/g, (_, hex) =>
+        String.fromCodePoint(parseInt(hex, 16))
+      )
+    );
+  } catch { return str; }
+}
+
+function formatDate(ts) {
+  if (!ts) return 'Unknown date';
+  const d = new Date(ts * 1000);
+  return d.toLocaleDateString('en-US', {year:'numeric',month:'short',day:'numeric'});
+}
+
+function orbitColor(ringIndex) {
+  return ORBIT_COLORS[ringIndex % ORBIT_COLORS.length];
+}
+
+function avatarPlaceholder(name, color) {
+  const initials = (name || '?').replace(/[^a-zA-Z\u00C0-\u024F\u0400-\u04FF]/g,'')
+    .slice(0, 2).toUpperCase() || '??';
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="44" height="44">
+    <circle cx="22" cy="22" r="22" fill="${color}22"/>
+    <text x="22" y="27" text-anchor="middle" fill="${color}" font-size="16" font-family="Outfit,sans-serif" font-weight="600">${initials}</text>
+  </svg>`;
+  return 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svg);
+}
+
+// ─── Layout: distribute followers across rings ─────────────
+function buildOrbitLayout(followers) {
+  const orbits = [];
+  let i = 0;
+  let ringIndex = 0;
+
+  while (i < followers.length) {
+    const r = CONFIG.firstOrbitRadius + ringIndex * CONFIG.orbitGap;
+    const circumference = 2 * Math.PI * r;
+    const capacity = Math.max(
+      CONFIG.minPlanetsPerRing,
+      Math.floor(circumference / (CONFIG.planetRadius * 2 * CONFIG.planetsPerRingFactor))
+    );
+    const slice = followers.slice(i, i + capacity);
+    orbits.push({ ringIndex, radius: r, color: orbitColor(ringIndex), planets: slice });
+    i += capacity;
+    ringIndex++;
+  }
+  return orbits;
+}
+
+// ─── Progress ─────────────────────────────────────────────
+function setProgress(pct, label) {
+  document.getElementById('progress-fill').style.width = pct + '%';
+  if (label) document.getElementById('loading-sub').textContent = label;
+}
+
+// ─── Main fetch & render flow ─────────────────────────────
+async function main() {
+  initStarfield();
+  setProgress(5, 'Fetching followers.json…');
+
+  let raw;
+  try {
+    const res = await fetch('./followers.json');
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    raw = await res.json();
+  } catch (e) {
+    console.error('Failed to load followers.json:', e);
+    document.getElementById('loading').classList.add('hidden');
+    document.getElementById('error-panel').classList.add('show');
+    return;
+  }
+
+  setProgress(25, 'Parsing follower data…');
+
+  // Support both export formats
+  const key = Object.keys(raw).find(k => k.includes('followers'));
+  const items = (key ? raw[key] : raw) || [];
+
+  followers = items.map((item, idx) => {
+    const sd = (item.string_list_data || [])[0] || {};
+    const name = decodeUnicode(sd.value || sd.title || 'Unknown');
+    const handle = sd.value ? '@' + sd.value : '@unknown';
+    const href = sd.href || '#';
+    const ts = sd.timestamp || 0;
+    const color = CONFIG.avatarColors[idx % CONFIG.avatarColors.length];
+    return { name, handle, href, ts, color, idx };
+  });
+
+  setProgress(50, `Processing ${followers.length} followers…`);
+
+  orbitData = buildOrbitLayout(followers);
+
+  // Assign initial angles
+  planetAngles = followers.map(() => 0);
+  let pIdx = 0;
+  orbitData.forEach(orbit => {
+    const n = orbit.planets.length;
+    orbit.planets.forEach((p, i) => {
+      planetAngles[p.idx] = (2 * Math.PI * i) / n;
+    });
+    pIdx += n;
+  });
+
+  setProgress(75, 'Rendering galaxy…');
+
+  initSVG();
+  drawOrbits();
+  drawSun();
+  drawPlanets();
+  setupControls();
+
+  setProgress(100, 'Done!');
+
+  document.getElementById('follower-count').textContent = followers.length;
+  document.getElementById('orbit-count').textContent = orbitData.length;
+  document.getElementById('hud').style.display = '';
+
+  setTimeout(() => {
+    document.getElementById('loading').classList.add('hidden');
+    requestAnimationFrame(animate);
+  }, 400);
+}
+
+// ─── Init D3 SVG + zoom/pan ───────────────────────────────
+function initSVG() {
+  svgEl = d3.select('#galaxy');
+
+  // SVG defs
+  const defs = svgEl.append('defs');
+
+  // Radial gradient for Sun
+  const sunGrad = defs.append('radialGradient').attr('id','sunGrad')
+    .attr('cx','40%').attr('cy','38%').attr('r','60%');
+  sunGrad.append('stop').attr('offset','0%').attr('stop-color','#fff9e8');
+  sunGrad.append('stop').attr('offset','40%').attr('stop-color','#ffd060');
+  sunGrad.append('stop').attr('offset','75%').attr('stop-color','#ff8c00');
+  sunGrad.append('stop').attr('offset','100%').attr('stop-color','#cc3300');
+
+  // Corona gradient
+  const coronaGrad = defs.append('radialGradient').attr('id','coronaGrad')
+    .attr('cx','50%').attr('cy','50%').attr('r','50%');
+  coronaGrad.append('stop').attr('offset','30%').attr('stop-color','rgba(255,160,0,0.35)');
+  coronaGrad.append('stop').attr('offset','100%').attr('stop-color','rgba(255,80,0,0)');
+
+  // Outer glow filter
+  const filter = defs.append('filter').attr('id','sunGlow')
+    .attr('x','-150%').attr('y','-150%').attr('width','400%').attr('height','400%');
+  filter.append('feGaussianBlur').attr('in','SourceGraphic').attr('stdDeviation','14').attr('result','blur');
+  const feMerge = filter.append('feMerge');
+  feMerge.append('feMergeNode').attr('in','blur');
+  feMerge.append('feMergeNode').attr('in','SourceGraphic');
+
+  // Planet glow filter
+  const pGlow = defs.append('filter').attr('id','planetGlow')
+    .attr('x','-80%').attr('y','-80%').attr('width','260%').attr('height','260%');
+  pGlow.append('feGaussianBlur').attr('in','SourceGraphic').attr('stdDeviation','5').attr('result','blur');
+  const pm = pGlow.append('feMerge');
+  pm.append('feMergeNode').attr('in','blur');
+  pm.append('feMergeNode').attr('in','SourceGraphic');
+
+  // Clippath for planet avatars
+  defs.append('clipPath').attr('id','planetClip')
+    .append('circle').attr('r', CONFIG.planetRadius);
+
+  // Main group
+  gMain = svgEl.append('g').attr('id','g-main');
+  gOrbits  = gMain.append('g').attr('id','g-orbits');
+  gPlanets = gMain.append('g').attr('id','g-planets');
+  gSun     = gMain.append('g').attr('id','g-sun');
+
+  // D3 Zoom
+  zoom = d3.zoom()
+    .scaleExtent([0.12, 5])
+    .on('zoom', e => gMain.attr('transform', e.transform));
+
+  svgEl.call(zoom);
+
+  // Center view
+  const W = window.innerWidth, H = window.innerHeight;
+  svgEl.call(zoom.transform, d3.zoomIdentity.translate(W / 2, H / 2));
+
+  // Resize handler
+  window.addEventListener('resize', () => {
+    const W2 = window.innerWidth, H2 = window.innerHeight;
+    svgEl.call(zoom.transform, d3.zoomIdentity.translate(W2 / 2, H2 / 2));
+  });
+}
+
+// ─── Draw orbit rings ─────────────────────────────────────
+function drawOrbits() {
+  orbitData.forEach((orbit, i) => {
+    gOrbits.append('circle')
+      .attr('class','orbit-ring')
+      .attr('cx', 0).attr('cy', 0)
+      .attr('r', orbit.radius)
+      .style('animation-delay', (i * 0.5) + 's');
+  });
+}
+
+// ─── Draw Sun ─────────────────────────────────────────────
+function drawSun() {
+  const R = CONFIG.sunRadius;
+
+  // Outer corona halo
+  gSun.append('circle')
+    .attr('cx',0).attr('cy',0).attr('r', R * 2.8)
+    .attr('fill','url(#coronaGrad)');
+
+  // Glow copy
+  gSun.append('circle')
+    .attr('cx',0).attr('cy',0).attr('r', R)
+    .attr('fill','url(#sunGrad)')
+    .attr('filter','url(#sunGlow)')
+    .attr('opacity','0.5');
+
+  // Main sun
+  gSun.append('circle')
+    .attr('cx',0).attr('cy',0).attr('r', R)
+    .attr('fill','url(#sunGrad)');
+
+  // Owner avatar (if provided)
+  if (CONFIG.ownerAvatar) {
+    const clip = d3.select('defs').append('clipPath').attr('id','sunClip')
+      .append('circle').attr('cx',0).attr('cy',0).attr('r', R - 2);
+
+    gSun.append('image')
+      .attr('href', CONFIG.ownerAvatar)
+      .attr('x', -(R - 2)).attr('y', -(R - 2))
+      .attr('width', (R - 2) * 2).attr('height', (R - 2) * 2)
+      .attr('clip-path','url(#sunClip)');
+  }
+
+  // Pulse ring
+  const pulseRing = gSun.append('circle')
+    .attr('cx',0).attr('cy',0).attr('r', R + 4)
+    .attr('fill','none')
+    .attr('stroke','rgba(255,200,0,0.4)')
+    .attr('stroke-width','2');
+
+  // Animate pulse ring
+  function pulsate() {
+    pulseRing
+      .attr('r', R + 4)
+      .attr('opacity', 0.6)
+      .transition().duration(2000).ease(d3.easeSinInOut)
+      .attr('r', R + 22)
+      .attr('opacity', 0)
+      .on('end', pulsate);
+  }
+  pulsate();
+}
+
+// ─── Draw Planet Nodes ────────────────────────────────────
+function drawPlanets() {
+  orbitData.forEach((orbit, oi) => {
+    orbit.planets.forEach((follower, pi) => {
+      const g = gPlanets.append('g')
+        .attr('class','planet-group')
+        .attr('data-idx', follower.idx)
+        .attr('data-orbit', oi)
+        .attr('data-orbit-pi', pi);
+
+      // Glow halo behind avatar
+      g.append('circle')
+        .attr('class','planet-glow')
+        .attr('r', CONFIG.planetRadius + 6)
+        .attr('fill', orbit.color + '30')
+        .attr('filter','url(#planetGlow)');
+
+      // Clip path per planet
+      const clipId = `pc-${follower.idx}`;
+      d3.select('defs').append('clipPath').attr('id', clipId)
+        .append('circle').attr('r', CONFIG.planetRadius);
+
+      // Avatar image
+      const imgEl = g.append('image')
+        .attr('class','planet-img')
+        .attr('href', avatarPlaceholder(follower.name, orbit.color))
+        .attr('x', -CONFIG.planetRadius)
+        .attr('y', -CONFIG.planetRadius)
+        .attr('width',  CONFIG.planetRadius * 2)
+        .attr('height', CONFIG.planetRadius * 2)
+        .attr('clip-path', `url(#${clipId})`)
+        .attr('preserveAspectRatio','xMidYMid slice');
+
+      // Attempt to load a real avatar via unavatar
+      loadAvatar(follower, imgEl, orbit.color);
+
+      // Ring border
+      g.append('circle')
+        .attr('class','planet-ring')
+        .attr('r', CONFIG.planetRadius)
+        .attr('fill','none')
+        .attr('stroke', orbit.color)
+        .attr('stroke-width','2');
+
+      // Interactivity
+      g.on('mouseenter', function(event) { showTooltip(event, follower, orbit, this); })
+       .on('mousemove',  function(event) { moveTooltip(event); })
+       .on('mouseleave', function()      { hideTooltip(); })
+       .on('touchstart', function(event) { event.preventDefault(); showTooltip(event.touches[0], follower, orbit, this); }, { passive: false })
+       .on('touchend',   function()      { /* keep open briefly */ });
+    });
+  });
+}
+
+// ─── Avatar loading (multi-strategy) ─────────────────────
+async function loadAvatar(follower, imgEl, color) {
+  // Strategy 1: unavatar service using Threads handle
+  const username = follower.handle.replace('@','');
+  const url1 = `https://unavatar.io/threads/${username}`;
+  const url2 = `https://unavatar.io/${username}`;
+
+  try {
+    const img = new Image();
+    img.crossOrigin = 'anonymous';
+    await new Promise((res, rej) => {
+      img.onload = res;
+      img.onerror = rej;
+      img.src = url1;
+      setTimeout(rej, 4000); // 4s timeout
+    });
+    imgEl.attr('href', url1);
+  } catch {
+    try {
+      const img2 = new Image();
+      img2.crossOrigin = 'anonymous';
+      await new Promise((res, rej) => {
+        img2.onload = res;
+        img2.onerror = rej;
+        img2.src = url2;
+        setTimeout(rej, 3000);
+      });
+      imgEl.attr('href', url2);
+    } catch {
+      // keep placeholder
+    }
+  }
+}
+
+// ─── Animation loop ───────────────────────────────────────
+function animate(ts) {
+  if (!startTime) startTime = ts;
+  if (!paused) {
+    const elapsed = (ts - startTime) / 1000; // seconds
+
+    orbitData.forEach((orbit, oi) => {
+      const duration = CONFIG.baseOrbitDuration + oi * CONFIG.durationIncrement;
+      const angularSpeed = (2 * Math.PI) / duration; // radians/sec
+      // alternate direction every other ring for visual interest
+      const direction = oi % 2 === 0 ? 1 : -1;
+
+      orbit.planets.forEach((follower, pi) => {
+        const baseAngle = (2 * Math.PI * pi) / orbit.planets.length;
+        const angle = baseAngle + direction * angularSpeed * elapsed;
+        const x = orbit.radius * Math.cos(angle);
+        const y = orbit.radius * Math.sin(angle);
+
+        d3.select(`[data-idx="${follower.idx}"]`)
+          .attr('transform', `translate(${x},${y})`);
+      });
+    });
+  }
+
+  animFrameId = requestAnimationFrame(animate);
+}
+
+// ─── Tooltip ──────────────────────────────────────────────
+const tooltip = document.getElementById('tooltip');
+let tooltipVisible = false;
+
+function showTooltip(event, follower, orbit) {
+  document.getElementById('tt-name').textContent   = follower.name;
+  document.getElementById('tt-handle').textContent = follower.handle;
+  document.getElementById('tt-date').textContent   = 'Followed on ' + formatDate(follower.ts);
+  document.getElementById('tt-link').href          = follower.href || '#';
+
+  // Avatar
+  const av = document.getElementById('tt-avatar');
+  av.src = avatarPlaceholder(follower.name, orbit.color);
+  const username = follower.handle.replace('@','');
+  const tryAvatar = new Image();
+  tryAvatar.onload = () => { av.src = `https://unavatar.io/threads/${username}`; };
+  tryAvatar.src = `https://unavatar.io/threads/${username}`;
+
+  moveTooltip(event);
+  tooltip.classList.add('visible');
+  tooltipVisible = true;
+}
+
+function moveTooltip(event) {
+  const vw = window.innerWidth, vh = window.innerHeight;
+  let x = (event.clientX || event.pageX) + 16;
+  let y = (event.clientY || event.pageY) + 16;
+
+  // Keep on screen
+  const tw = 290, th = 180;
+  if (x + tw > vw - 12) x = (event.clientX || event.pageX) - tw - 12;
+  if (y + th > vh - 12) y = (event.clientY || event.pageY) - th - 12;
+
+  tooltip.style.left = x + 'px';
+  tooltip.style.top  = y + 'px';
+}
+
+function hideTooltip() {
+  tooltip.classList.remove('visible');
+  tooltipVisible = false;
+}
+
+// ─── Controls ─────────────────────────────────────────────
+function setupControls() {
+  document.getElementById('btn-zoom-in').addEventListener('click', () => {
+    svgEl.transition().call(zoom.scaleBy, 1.4);
+  });
+  document.getElementById('btn-zoom-out').addEventListener('click', () => {
+    svgEl.transition().call(zoom.scaleBy, 0.7);
+  });
+  document.getElementById('btn-reset').addEventListener('click', () => {
+    const W = window.innerWidth, H = window.innerHeight;
+    svgEl.transition().duration(600)
+      .call(zoom.transform, d3.zoomIdentity.translate(W / 2, H / 2));
+  });
+  document.getElementById('btn-pause').addEventListener('click', function() {
+    paused = !paused;
+    this.textContent = paused ? '▶' : '⏸';
+    if (!paused) { startTime = null; requestAnimationFrame(animate); }
+  });
+}
+
+// ─── Boot ─────────────────────────────────────────────────
+main();
+</script>
+</body>
+</html>
