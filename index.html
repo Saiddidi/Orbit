@@ -1,4 +1,3 @@
-
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -59,6 +58,7 @@
     width: 100%; height: 100%;
     z-index: 1;
     cursor: grab;
+    will-change: transform;
   }
   #galaxy:active { cursor: grabbing; }
 
@@ -86,9 +86,13 @@
     from { opacity: 0.6; r: 38px; }
     to   { opacity: 1.0; r: 46px; }
   }
+  .sun-rays {
+    animation: rays-spin 20s linear infinite;
+    transform-origin: center;
+  }
 
   /* ─── Planet nodes ─── */
-  .planet-group { cursor: pointer; will-change: transform; }
+  .planet-group { cursor: pointer; }
   .planet-clip { clip-path: url(#planetClip); }
 
   .planet-ring {
@@ -384,6 +388,15 @@
     font-size: 12px;
   }
 
+  /* ─── Animate orbit nodes ─── */
+  .planet-orbit-path {
+    animation-name: orbit-spin;
+    animation-timing-function: linear;
+    animation-iteration-count: infinite;
+    transform-box: fill-box;
+    transform-origin: center;
+  }
+
   /* ─── Responsive ─── */
   @media (max-width: 600px) {
     #hud { padding: 8px 16px; gap: 12px; }
@@ -395,8 +408,10 @@
 </head>
 <body>
 
+<!-- Starfield -->
 <canvas id="starfield"></canvas>
 
+<!-- Loading Screen -->
 <div id="loading">
   <div class="loader-sun"></div>
   <div id="loading-text">Mapping your galaxy…</div>
@@ -404,20 +419,24 @@
   <div id="loading-sub">Loading follower data and rendering orbits</div>
 </div>
 
+<!-- Error Panel -->
 <div id="error-panel">
   <h2>⚠ Could not load followers.json</h2>
   <p>Make sure <code>followers.json</code> is placed in the <strong>same folder</strong> as <code>index.html</code> and you are serving the files via a local web server (e.g. <code>npx serve .</code> or VS Code Live Server).<br><br>Opening the HTML file directly via <code>file://</code> will block the fetch due to browser security policies.</p>
   <p style="margin-top:8px; color: rgba(200,215,255,0.3); font-size:12px;">Check your browser console for more details.</p>
 </div>
 
+<!-- HUD -->
 <div id="hud" style="display:none;">
   <span id="hud-title">✦ Orbit</span>
   <div id="hud-sep"></div>
   <span id="hud-count"><span id="follower-count">0</span> followers across <span id="orbit-count">0</span> rings</span>
 </div>
 
+<!-- Main SVG Canvas -->
 <svg id="galaxy"></svg>
 
+<!-- Tooltip -->
 <div id="tooltip">
   <div class="tooltip-inner">
     <img class="tooltip-avatar" id="tt-avatar" src="" alt="" />
@@ -435,6 +454,7 @@
   </div>
 </div>
 
+<!-- Controls -->
 <div id="controls">
   <button class="ctrl-btn" id="btn-zoom-in"  title="Zoom In">+</button>
   <button class="ctrl-btn" id="btn-zoom-out" title="Zoom Out">−</button>
@@ -442,6 +462,7 @@
   <button class="ctrl-btn" id="btn-pause"    title="Toggle Animation">⏸</button>
 </div>
 
+<!-- Legend -->
 <div id="legend">
   <div style="font-family:var(--font-display);font-size:10px;letter-spacing:.1em;color:var(--text-primary);margin-bottom:4px;">ORBITS</div>
   <div class="legend-row"><div class="legend-dot" style="background:#ffd060;box-shadow:0 0 6px #ffd060;"></div>Inner ring</div>
@@ -452,33 +473,36 @@
 
 <script>
 /* ═══════════════════════════════════════════════════════════
-   ORBIT — Social Galaxy Visualizer (Highly Optimized)
+   ORBIT — Social Galaxy Visualizer
    ═══════════════════════════════════════════════════════════ */
 
 // ─── Config ───────────────────────────────────────────────
 const CONFIG = {
-  ownerName:    "Said Didi",       
-  ownerHandle:  "@sa_d.idi",   
-  ownerAvatar:  "",            // Will be auto-loaded dynamically
+  // The owner of the profile (center Sun)
+  ownerName:    "sa_d.idi",
+  ownerHandle:  "@sa_d.idi",
+  ownerAvatar:  "https://unavatar.io/threads/sa_d.idi",  // Auto-loaded from Threads
 
   // Solar system layout
   sunRadius:         38,
   firstOrbitRadius:  130,
-  orbitGap:          100,   
-  planetRadius:      22,    
+  orbitGap:          100,   // px between each ring
+  planetRadius:      22,    // avatar circle radius
   minPlanetsPerRing: 4,
-  planetsPerRingFactor: 6.5, 
+  planetsPerRingFactor: 6.5, // circumference / factor = capacity
 
   // Animation
-  baseOrbitDuration: 60,    
-  durationIncrement: 30,    
+  baseOrbitDuration: 60,    // seconds for innermost ring
+  durationIncrement: 30,    // seconds added per ring outward
 
+  // Avatar fallback
   avatarColors: [
     '#7eb8ff','#b48cff','#ff8caa','#ffd060',
     '#6effc8','#ff9f5a','#5af0ff','#e87bff'
   ],
 };
 
+// ─── Colour scale per orbit ────────────────────────────────
 const ORBIT_COLORS = [
   '#ffd060','#f0a030',
   '#7eb8ff','#5aa0ff','#3d80ff',
@@ -490,102 +514,45 @@ const ORBIT_COLORS = [
 let svgEl, zoom, gMain, gOrbits, gSun, gPlanets;
 let followers = [];
 let orbitData = [];
-let flatPlanetData = []; // Blazing fast cached array for DOM rendering
 let paused = false;
 let animFrameId;
 let startTime = null;
+let planetAngles = [];  // current angle per planet
 
-// ─── Avatar Queue Manager (Prevents lagging during loads) ─
-const avatarQueue = [];
-let activeConnections = 0;
-const MAX_CONCURRENT_LOADS = 4; // Fetch maximum 4 images simultaneously
-
-function processAvatarQueue() {
-  if (avatarQueue.length === 0 || activeConnections >= MAX_CONCURRENT_LOADS) return;
-  const task = avatarQueue.shift();
-  activeConnections++;
-  executeAvatarLoad(task.follower, task.imgEl).finally(() => {
-    activeConnections--;
-    processAvatarQueue();
-  });
-}
-
-async function executeAvatarLoad(follower, imgEl) {
-  const username = follower.handle.replace('@','');
-  const url1 = `https://unavatar.io/threads/${username}`;
-  const url2 = `https://unavatar.io/${username}`;
-
-  try {
-    const img = new Image();
-    await new Promise((res, rej) => {
-      img.onload = res; img.onerror = rej;
-      img.src = url1;
-      setTimeout(rej, 2500);
-    });
-    imgEl.attr('href', url1);
-  } catch {
-    try {
-      const img2 = new Image();
-      await new Promise((res, rej) => {
-        img2.onload = res; img2.onerror = rej;
-        img2.src = url2;
-        setTimeout(rej, 2000);
-      });
-      imgEl.attr('href', url2);
-    } catch {
-      // Retain standard placeholder safely
-    }
-  }
-}
-
-function queueAvatarLoad(follower, imgEl) {
-  avatarQueue.push({ follower, imgEl });
-  processAvatarQueue();
-}
-
-// ─── Auto Detect Profile Identity from Environment ────────
-function autoDetectOwner() {
-  const hostname = window.location.hostname;
-  let detectedUser = "saaddidi"; // Default fallback derived from your environment
-  
-  if (hostname.includes('.github.io')) {
-    detectedUser = hostname.split('.')[0];
-  }
-  
-  CONFIG.ownerHandle = '@' + detectedUser;
-  CONFIG.ownerName = detectedUser;
-  CONFIG.ownerAvatar = `https://unavatar.io/github/${detectedUser}`;
-}
-
-// ─── Starfield Canvas ─────────────────────────────────────
+// ─── Starfield ────────────────────────────────────────────
 function initStarfield() {
   const canvas = document.getElementById('starfield');
-  const ctx = canvas.getContext('2d');
+  const ctx = canvas.getContext('2d', { willReadFrequently: false, alpha: true });
+  const isMobile = window.innerWidth < 600;
+  const STAR_COUNT = isMobile ? 100 : 220; // fewer stars on mobile
   let W, H, stars = [];
 
   function resize() {
     W = canvas.width  = window.innerWidth;
     H = canvas.height = window.innerHeight;
-    stars = Array.from({length: 150}, () => ({ // Optimized count slightly
+    stars = Array.from({length: STAR_COUNT}, () => ({
       x: Math.random() * W,
       y: Math.random() * H,
-      r: Math.random() * 1.2 + 0.2,
+      r: Math.random() * 1.4 + 0.2,
       a: Math.random() * 0.7 + 0.1,
-      speed: Math.random() * 0.2 + 0.05,
+      speed: Math.random() * 0.3 + 0.05,
       phase: Math.random() * Math.PI * 2,
     }));
   }
 
+  let lastStarTs = 0;
   function draw(t) {
-    ctx.clearRect(0, 0, W, H);
-    const len = stars.length;
-    for(let i = 0; i < len; i++) {
-      const s = stars[i];
-      const alpha = s.a * (0.6 + 0.4 * Math.sin(t * 0.001 * s.speed + s.phase));
-      ctx.beginPath();
-      ctx.arc(s.x, s.y, s.r, 0, Math.PI * 2);
-      ctx.fillStyle = `rgba(200,220,255,${alpha})`;
-      ctx.fill();
+    // Only redraw starfield at 30fps to save GPU
+    if (t - lastStarTs > 33) {
+      ctx.clearRect(0, 0, W, H);
+      stars.forEach(s => {
+        const alpha = s.a * (0.6 + 0.4 * Math.sin(t * 0.001 * s.speed + s.phase));
+        ctx.beginPath();
+        ctx.arc(s.x, s.y, s.r, 0, Math.PI * 2);
+        ctx.fillStyle = `rgba(200,220,255,${alpha.toFixed(2)})`;
+        ctx.fill();
+      });
+      lastStarTs = t;
     }
     requestAnimationFrame(draw);
   }
@@ -627,6 +594,7 @@ function avatarPlaceholder(name, color) {
   return 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svg);
 }
 
+// ─── Layout: distribute followers across rings ─────────────
 function buildOrbitLayout(followers) {
   const orbits = [];
   let i = 0;
@@ -647,14 +615,14 @@ function buildOrbitLayout(followers) {
   return orbits;
 }
 
+// ─── Progress ─────────────────────────────────────────────
 function setProgress(pct, label) {
   document.getElementById('progress-fill').style.width = pct + '%';
   if (label) document.getElementById('loading-sub').textContent = label;
 }
 
-// ─── Main Pipeline ────────────────────────────────────────
+// ─── Main fetch & render flow ─────────────────────────────
 async function main() {
-  autoDetectOwner();
   initStarfield();
   setProgress(5, 'Fetching followers.json…');
 
@@ -672,6 +640,7 @@ async function main() {
 
   setProgress(25, 'Parsing follower data…');
 
+  // Support both export formats
   const key = Object.keys(raw).find(k => k.includes('followers'));
   const items = (key ? raw[key] : raw) || [];
 
@@ -689,24 +658,15 @@ async function main() {
 
   orbitData = buildOrbitLayout(followers);
 
-  // Pre-compile and flatten mathematical layout variables (Massive speed gains)
-  flatPlanetData = [];
-  orbitData.forEach((orbit, oi) => {
-    const duration = CONFIG.baseOrbitDuration + oi * CONFIG.durationIncrement;
-    const angularSpeed = (2 * Math.PI) / duration;
-    const direction = oi % 2 === 0 ? 1 : -1;
+  // Assign initial angles
+  planetAngles = followers.map(() => 0);
+  let pIdx = 0;
+  orbitData.forEach(orbit => {
     const n = orbit.planets.length;
-
-    orbit.planets.forEach((follower, pi) => {
-      flatPlanetData.push({
-        idx: follower.idx,
-        radius: orbit.radius,
-        baseAngle: (2 * Math.PI * pi) / n,
-        angularSpeed: angularSpeed,
-        direction: direction,
-        node: null // Bound natively during layout construction
-      });
+    orbit.planets.forEach((p, i) => {
+      planetAngles[p.idx] = (2 * Math.PI * i) / n;
     });
+    pIdx += n;
   });
 
   setProgress(75, 'Rendering galaxy…');
@@ -726,12 +686,16 @@ async function main() {
   setTimeout(() => {
     document.getElementById('loading').classList.add('hidden');
     requestAnimationFrame(animate);
+    // Start background avatar preload after UI is visible
+    setTimeout(() => preloadAvatars(followers), 200);
   }, 400);
 }
 
-// ─── Init D3 SVG + Zoom ───────────────────────────────────
+// ─── Init D3 SVG + zoom/pan ───────────────────────────────
 function initSVG() {
   svgEl = d3.select('#galaxy');
+
+  // SVG defs
   const defs = svgEl.append('defs');
 
   // Radial gradient for Sun
@@ -764,97 +728,93 @@ function initSVG() {
   pm.append('feMergeNode').attr('in','blur');
   pm.append('feMergeNode').attr('in','SourceGraphic');
 
+  // Clippath for planet avatars
+  defs.append('clipPath').attr('id','planetClip')
+    .append('circle').attr('r', CONFIG.planetRadius);
+
+  // Main group
   gMain = svgEl.append('g').attr('id','g-main');
   gOrbits  = gMain.append('g').attr('id','g-orbits');
   gPlanets = gMain.append('g').attr('id','g-planets');
   gSun     = gMain.append('g').attr('id','g-sun');
 
+  // D3 Zoom
   zoom = d3.zoom()
-    .scaleExtent([0.08, 5]) // Extended out to see vast galaxies comfortably
+    .scaleExtent([0.12, 5])
     .on('zoom', e => gMain.attr('transform', e.transform));
 
   svgEl.call(zoom);
 
+  // Center view
   const W = window.innerWidth, H = window.innerHeight;
   svgEl.call(zoom.transform, d3.zoomIdentity.translate(W / 2, H / 2));
 
+  // Resize handler
   window.addEventListener('resize', () => {
     const W2 = window.innerWidth, H2 = window.innerHeight;
     svgEl.call(zoom.transform, d3.zoomIdentity.translate(W2 / 2, H2 / 2));
   });
 }
 
+// ─── Draw orbit rings ─────────────────────────────────────
 function drawOrbits() {
   orbitData.forEach((orbit, i) => {
     gOrbits.append('circle')
       .attr('class','orbit-ring')
       .attr('cx', 0).attr('cy', 0)
-      .attr('r', orbit.radius);
+      .attr('r', orbit.radius)
+      .style('animation-delay', (i * 0.5) + 's');
   });
 }
 
-// ─── Draw Sun (With Automatic Avatar Loader) ──────────────
+// ─── Draw Sun ─────────────────────────────────────────────
 function drawSun() {
   const R = CONFIG.sunRadius;
-  const defs = d3.select('defs');
 
   // Outer corona halo
   gSun.append('circle')
     .attr('cx',0).attr('cy',0).attr('r', R * 2.8)
     .attr('fill','url(#coronaGrad)');
 
-  // Sun Core Base
+  // Glow copy
   gSun.append('circle')
     .attr('cx',0).attr('cy',0).attr('r', R)
     .attr('fill','url(#sunGrad)')
-    .attr('filter','url(#sunGlow)');
+    .attr('filter','url(#sunGlow)')
+    .attr('opacity','0.5');
 
-  // Main Sun Element
+  // Main sun
   gSun.append('circle')
     .attr('cx',0).attr('cy',0).attr('r', R)
     .attr('fill','url(#sunGrad)');
 
-  // Clip Path for Sun Circle Avatar
-  defs.append('clipPath').attr('id','sunClip')
-    .append('circle').attr('cx',0).attr('cy',0).attr('r', R - 2);
+  // Owner avatar (if provided) - load with error fallback
+  if (CONFIG.ownerAvatar) {
+    const clip = d3.select('defs').append('clipPath').attr('id','sunClip')
+      .append('circle').attr('cx',0).attr('cy',0).attr('r', R - 2);
 
-  // Dynamic Avatar Canvas Image for Main Node
-  const sunImage = gSun.append('image')
-    .attr('x', -(R - 2)).attr('y', -(R - 2))
-    .attr('width', (R - 2) * 2).attr('height', (R - 2) * 2)
-    .attr('clip-path','url(#sunClip)');
+    const sunImg = gSun.append('image')
+      .attr('href', CONFIG.ownerAvatar)
+      .attr('x', -(R - 2)).attr('y', -(R - 2))
+      .attr('width', (R - 2) * 2).attr('height', (R - 2) * 2)
+      .attr('clip-path','url(#sunClip)')
+      .attr('preserveAspectRatio','xMidYMid slice');
 
-  // Automatic Strategy Engine to pull profile picture safely
-  if(CONFIG.ownerAvatar) {
-    const mainImgDetector = new Image();
-    mainImgDetector.onload = () => sunImage.attr('href', CONFIG.ownerAvatar);
-    mainImgDetector.onerror = () => {
-      // Fallback Strategy if primary endpoint fails
-      const fallbackUsername = CONFIG.ownerHandle.replace('@','');
-      sunImage.attr('href', `https://unavatar.io/unavatar/${fallbackUsername}`);
-    };
-    mainImgDetector.src = CONFIG.ownerAvatar;
+    // Verify avatar loads, remove if it fails
+    const testImg = new Image();
+    testImg.crossOrigin = 'anonymous';
+    testImg.onerror = () => sunImg.remove();
+    testImg.src = CONFIG.ownerAvatar;
   }
 
-  // Interactivity for Sun Node
-  gSun.style('cursor', 'pointer').on('mouseenter', function(event) {
-    showTooltip(event, {
-      name: CONFIG.ownerName,
-      handle: CONFIG.ownerHandle,
-      ts: Math.floor(Date.now() / 1000), 
-      href: `https://github.com/${CONFIG.ownerHandle.replace('@','')}`
-    }, { color: '#ffd060' }, true);
-  })
-  .on('mousemove', moveTooltip)
-  .on('mouseleave', hideTooltip);
-
-  // Dynamic Pulse Ring
+  // Pulse ring
   const pulseRing = gSun.append('circle')
     .attr('cx',0).attr('cy',0).attr('r', R + 4)
     .attr('fill','none')
     .attr('stroke','rgba(255,200,0,0.4)')
     .attr('stroke-width','2');
 
+  // Animate pulse ring
   function pulsate() {
     pulseRing
       .attr('r', R + 4)
@@ -869,12 +829,13 @@ function drawSun() {
 
 // ─── Draw Planet Nodes ────────────────────────────────────
 function drawPlanets() {
-  const defs = d3.select('defs');
-  
   orbitData.forEach((orbit, oi) => {
-    orbit.planets.forEach((follower) => {
+    orbit.planets.forEach((follower, pi) => {
       const g = gPlanets.append('g')
-        .attr('class','planet-group');
+        .attr('class','planet-group')
+        .attr('data-idx', follower.idx)
+        .attr('data-orbit', oi)
+        .attr('data-orbit-pi', pi);
 
       // Glow halo behind avatar
       g.append('circle')
@@ -883,11 +844,12 @@ function drawPlanets() {
         .attr('fill', orbit.color + '30')
         .attr('filter','url(#planetGlow)');
 
+      // Clip path per planet
       const clipId = `pc-${follower.idx}`;
-      defs.append('clipPath').attr('id', clipId)
+      d3.select('defs').append('clipPath').attr('id', clipId)
         .append('circle').attr('r', CONFIG.planetRadius);
 
-      // Default high-performance placeholder injection
+      // Avatar image
       const imgEl = g.append('image')
         .attr('class','planet-img')
         .attr('href', avatarPlaceholder(follower.name, orbit.color))
@@ -898,16 +860,10 @@ function drawPlanets() {
         .attr('clip-path', `url(#${clipId})`)
         .attr('preserveAspectRatio','xMidYMid slice');
 
-      // Bind raw native DOM element pointer directly to the mathematical structure
-      const lookupMatch = flatPlanetData.find(d => d.idx === follower.idx);
-      if (lookupMatch) {
-        lookupMatch.node = g.node();
-      }
+      // Attempt to load a real avatar via unavatar
+      loadAvatar(follower, imgEl, orbit.color);
 
-      // Append image tasks to background processing sequence queue
-      queueAvatarLoad(follower, imgEl);
-
-      // Border contour stroke ring
+      // Ring border
       g.append('circle')
         .attr('class','planet-ring')
         .attr('r', CONFIG.planetRadius)
@@ -915,62 +871,124 @@ function drawPlanets() {
         .attr('stroke', orbit.color)
         .attr('stroke-width','2');
 
-      // Native hardware listeners
-      g.on('mouseenter', function(event) { showTooltip(event, follower, orbit, false); })
-       .on('mousemove',  moveTooltip)
-       .on('mouseleave', hideTooltip)
-       .on('touchstart', function(event) { 
-          event.preventDefault(); 
-          showTooltip(event.touches[0], follower, orbit, false); 
-       }, { passive: false });
+      // Interactivity
+      g.on('mouseenter', function(event) { showTooltip(event, follower, orbit, this); })
+       .on('mousemove',  function(event) { moveTooltip(event); })
+       .on('mouseleave', function()      { hideTooltip(); })
+       .on('touchstart', function(event) { event.preventDefault(); showTooltip(event.touches[0], follower, orbit, this); }, { passive: false })
+       .on('touchend',   function()      { /* keep open briefly */ });
     });
   });
 }
 
-// ─── Blazing Fast Render Engine (0% Layout Thrashing) ─────
+// ─── Avatar loading (fast batch strategy) ────────────────
+// Global avatar cache to avoid duplicate requests
+const avatarCache = new Map();
+const AVATAR_TIMEOUT = 3000; // 3s max per avatar
+
+function getAvatarUrl(handle) {
+  const username = handle.replace('@','');
+  // Try multiple CDN sources in order of reliability
+  return [
+    `https://unavatar.io/threads/${username}`,
+    `https://unavatar.io/${username}`,
+  ];
+}
+
+function loadAvatarCached(url) {
+  if (avatarCache.has(url)) return avatarCache.get(url);
+  const p = new Promise((resolve, reject) => {
+    const img = new Image();
+    img.crossOrigin = 'anonymous';
+    const timer = setTimeout(() => reject(new Error('timeout')), AVATAR_TIMEOUT);
+    img.onload  = () => { clearTimeout(timer); resolve(url); };
+    img.onerror = () => { clearTimeout(timer); reject(); };
+    img.src = url;
+  });
+  avatarCache.set(url, p);
+  return p;
+}
+
+async function loadAvatar(follower, imgEl, color) {
+  const urls = getAvatarUrl(follower.handle);
+  for (const url of urls) {
+    try {
+      await loadAvatarCached(url);
+      imgEl.attr('href', url);
+      return;
+    } catch { /* try next */ }
+  }
+  // keep placeholder on all failures
+}
+
+// Batch preload avatars with concurrency limit
+async function preloadAvatars(followers) {
+  const CONCURRENCY = 8; // load 8 at a time
+  let i = 0;
+  async function next() {
+    if (i >= followers.length) return;
+    const f = followers[i++];
+    const urls = getAvatarUrl(f.handle);
+    // Fire-and-forget: pre-warm cache
+    for (const url of urls) {
+      loadAvatarCached(url).catch(() => {});
+      break; // only preload first URL
+    }
+    return next();
+  }
+  const workers = Array.from({length: CONCURRENCY}, next);
+  await Promise.allSettled(workers);
+}
+
+// ─── Animation loop ───────────────────────────────────────
 function animate(ts) {
   if (!startTime) startTime = ts;
   if (!paused) {
-    const elapsed = (ts - startTime) / 1000; 
-    const len = flatPlanetData.length;
+    const elapsed = (ts - startTime) / 1000; // seconds
 
-    // Standard raw performance loop
-    for (let i = 0; i < len; i++) {
-      const p = flatPlanetData[i];
-      
-      // Calculate angular vectors smoothly
-      const currentAngle = p.baseAngle + p.direction * p.angularSpeed * elapsed;
-      const posX = p.radius * Math.cos(currentAngle);
-      const posY = p.radius * Math.sin(currentAngle);
+    orbitData.forEach((orbit, oi) => {
+      const duration = CONFIG.baseOrbitDuration + oi * CONFIG.durationIncrement;
+      const angularSpeed = (2 * Math.PI) / duration; // radians/sec
+      // alternate direction every other ring for visual interest
+      const direction = oi % 2 === 0 ? 1 : -1;
 
-      // Direct write mutation bypassing layout pipelines entirely
-      p.node.setAttribute('transform', `translate(${posX},${posY})`);
-    }
+      orbit.planets.forEach((follower, pi) => {
+        const baseAngle = (2 * Math.PI * pi) / orbit.planets.length;
+        const angle = baseAngle + direction * angularSpeed * elapsed;
+        const x = orbit.radius * Math.cos(angle);
+        const y = orbit.radius * Math.sin(angle);
+
+        d3.select(`[data-idx="${follower.idx}"]`)
+          .attr('transform', `translate(${x},${y})`);
+      });
+    });
   }
+
   animFrameId = requestAnimationFrame(animate);
 }
 
 // ─── Tooltip ──────────────────────────────────────────────
 const tooltip = document.getElementById('tooltip');
+let tooltipVisible = false;
 
-function showTooltip(event, follower, orbit, isSunNode = false) {
+function showTooltip(event, follower, orbit) {
   document.getElementById('tt-name').textContent   = follower.name;
   document.getElementById('tt-handle').textContent = follower.handle;
-  document.getElementById('tt-date').textContent   = isSunNode ? 'Galaxy Creator' : 'Followed on ' + formatDate(follower.ts);
+  document.getElementById('tt-date').textContent   = 'Followed on ' + formatDate(follower.ts);
   document.getElementById('tt-link').href          = follower.href || '#';
 
+  // Avatar in tooltip - use cache
   const av = document.getElementById('tt-avatar');
   av.src = avatarPlaceholder(follower.name, orbit.color);
-  
   const username = follower.handle.replace('@','');
-  if(isSunNode) {
-    av.src = CONFIG.ownerAvatar;
-  } else {
-    av.src = `https://unavatar.io/threads/${username}`;
-  }
+  const ttUrl = `https://unavatar.io/threads/${username}`;
+  loadAvatarCached(ttUrl)
+    .then(() => { av.src = ttUrl; })
+    .catch(() => {});
 
   moveTooltip(event);
   tooltip.classList.add('visible');
+  tooltipVisible = true;
 }
 
 function moveTooltip(event) {
@@ -978,6 +996,7 @@ function moveTooltip(event) {
   let x = (event.clientX || event.pageX) + 16;
   let y = (event.clientY || event.pageY) + 16;
 
+  // Keep on screen
   const tw = 290, th = 180;
   if (x + tw > vw - 12) x = (event.clientX || event.pageX) - tw - 12;
   if (y + th > vh - 12) y = (event.clientY || event.pageY) - th - 12;
@@ -988,20 +1007,21 @@ function moveTooltip(event) {
 
 function hideTooltip() {
   tooltip.classList.remove('visible');
+  tooltipVisible = false;
 }
 
 // ─── Controls ─────────────────────────────────────────────
 function setupControls() {
   document.getElementById('btn-zoom-in').addEventListener('click', () => {
-    svgEl.transition().duration(250).call(zoom.scaleBy, 1.4);
+    svgEl.transition().call(zoom.scaleBy, 1.4);
   });
   document.getElementById('btn-zoom-out').addEventListener('click', () => {
-    svgEl.transition().duration(250).call(zoom.scaleBy, 0.7);
+    svgEl.transition().call(zoom.scaleBy, 0.7);
   });
   document.getElementById('btn-reset').addEventListener('click', () => {
     const W = window.innerWidth, H = window.innerHeight;
     svgEl.transition().duration(600)
-      .call(zoom.transform, d3.zoomIdentity.translate(W / 2, H / 2).scale(1));
+      .call(zoom.transform, d3.zoomIdentity.translate(W / 2, H / 2));
   });
   document.getElementById('btn-pause').addEventListener('click', function() {
     paused = !paused;
@@ -1010,7 +1030,7 @@ function setupControls() {
   });
 }
 
-// Boot setup
+// ─── Boot ─────────────────────────────────────────────────
 main();
 </script>
 </body>
