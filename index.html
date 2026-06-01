@@ -58,7 +58,6 @@
     width: 100%; height: 100%;
     z-index: 1;
     cursor: grab;
-    will-change: transform;
   }
   #galaxy:active { cursor: grabbing; }
 
@@ -481,7 +480,7 @@ const CONFIG = {
   // The owner of the profile (center Sun)
   ownerName:    "sa_d.idi",
   ownerHandle:  "@sa_d.idi",
-  ownerAvatar:  "https://unavatar.io/threads/sa_d.idi",  // Auto-loaded from Threads
+  ownerAvatar:  "",  // Will be loaded automatically below
 
   // Solar system layout
   sunRadius:         38,
@@ -522,39 +521,44 @@ let planetAngles = [];  // current angle per planet
 // ─── Starfield ────────────────────────────────────────────
 function initStarfield() {
   const canvas = document.getElementById('starfield');
-  const ctx = canvas.getContext('2d', { willReadFrequently: false, alpha: true });
-  const isMobile = window.innerWidth < 600;
-  const STAR_COUNT = isMobile ? 100 : 220; // fewer stars on mobile
+  const ctx = canvas.getContext('2d', { willReadFrequently: false, alpha: false });
   let W, H, stars = [];
+  // Throttle starfield to ~30fps to save resources for orbit animation
+  let lastStarDraw = 0;
 
   function resize() {
     W = canvas.width  = window.innerWidth;
     H = canvas.height = window.innerHeight;
-    stars = Array.from({length: STAR_COUNT}, () => ({
+    // Reduce star count on mobile
+    const count = window.innerWidth < 600 ? 100 : 160;
+    stars = Array.from({length: count}, () => ({
       x: Math.random() * W,
       y: Math.random() * H,
-      r: Math.random() * 1.4 + 0.2,
-      a: Math.random() * 0.7 + 0.1,
-      speed: Math.random() * 0.3 + 0.05,
+      r: Math.random() * 1.3 + 0.2,
+      a: Math.random() * 0.7 + 0.15,
+      speed: Math.random() * 0.2 + 0.04,
       phase: Math.random() * Math.PI * 2,
     }));
   }
 
-  let lastStarTs = 0;
   function draw(t) {
-    // Only redraw starfield at 30fps to save GPU
-    if (t - lastStarTs > 33) {
-      ctx.clearRect(0, 0, W, H);
-      stars.forEach(s => {
-        const alpha = s.a * (0.6 + 0.4 * Math.sin(t * 0.001 * s.speed + s.phase));
-        ctx.beginPath();
-        ctx.arc(s.x, s.y, s.r, 0, Math.PI * 2);
-        ctx.fillStyle = `rgba(200,220,255,${alpha.toFixed(2)})`;
-        ctx.fill();
-      });
-      lastStarTs = t;
-    }
     requestAnimationFrame(draw);
+    // Throttle to ~30fps
+    if (t - lastStarDraw < 33) return;
+    lastStarDraw = t;
+
+    ctx.fillStyle = '#03040a';
+    ctx.fillRect(0, 0, W, H);
+
+    // Group stars by approximate alpha bucket to reduce fillStyle changes
+    for (let i = 0; i < stars.length; i++) {
+      const s = stars[i];
+      const alpha = s.a * (0.6 + 0.4 * Math.sin(t * 0.001 * s.speed + s.phase));
+      ctx.beginPath();
+      ctx.arc(s.x, s.y, s.r, 0, Math.PI * 2);
+      ctx.fillStyle = `rgba(200,220,255,${alpha.toFixed(2)})`;
+      ctx.fill();
+    }
   }
 
   window.addEventListener('resize', resize);
@@ -626,6 +630,9 @@ async function main() {
   initStarfield();
   setProgress(5, 'Fetching followers.json…');
 
+  // Load owner avatar early (parallel with fetch)
+  const ownerAvatarPromise = loadOwnerAvatar();
+
   let raw;
   try {
     const res = await fetch('./followers.json');
@@ -637,6 +644,9 @@ async function main() {
     document.getElementById('error-panel').classList.add('show');
     return;
   }
+
+  // Wait for owner avatar to be resolved
+  await ownerAvatarPromise;
 
   setProgress(25, 'Parsing follower data…');
 
@@ -660,13 +670,11 @@ async function main() {
 
   // Assign initial angles
   planetAngles = followers.map(() => 0);
-  let pIdx = 0;
   orbitData.forEach(orbit => {
     const n = orbit.planets.length;
     orbit.planets.forEach((p, i) => {
       planetAngles[p.idx] = (2 * Math.PI * i) / n;
     });
-    pIdx += n;
   });
 
   setProgress(75, 'Rendering galaxy…');
@@ -686,7 +694,34 @@ async function main() {
   setTimeout(() => {
     document.getElementById('loading').classList.add('hidden');
     requestAnimationFrame(animate);
+    // Load avatars in batches after UI is visible (reduce initial lag)
+    loadAvatarsBatched();
   }, 400);
+}
+
+// ─── Load avatars in batches to avoid blocking animation ──
+function loadAvatarsBatched() {
+  const BATCH = 8;
+  const DELAY = 300; // ms between batches
+  let idx = 0;
+  const allPlanets = [];
+  orbitData.forEach(orbit => {
+    orbit.planets.forEach(follower => {
+      const imgEl = d3.select(`[data-idx="${follower.idx}"] image.planet-img`);
+      allPlanets.push({ follower, imgEl, color: orbit.color });
+    });
+  });
+
+  function loadBatch() {
+    const batch = allPlanets.slice(idx, idx + BATCH);
+    if (!batch.length) return;
+    batch.forEach(({ follower, imgEl, color }) => {
+      loadAvatar(follower, imgEl, color);
+    });
+    idx += BATCH;
+    if (idx < allPlanets.length) setTimeout(loadBatch, DELAY);
+  }
+  loadBatch();
 }
 
 // ─── Init D3 SVG + zoom/pan ───────────────────────────────
@@ -786,28 +821,16 @@ function drawSun() {
     .attr('cx',0).attr('cy',0).attr('r', R)
     .attr('fill','url(#sunGrad)');
 
-  // Owner avatar - try direct URL first, then proxy
+  // Owner avatar (if provided)
   if (CONFIG.ownerAvatar) {
     const clip = d3.select('defs').append('clipPath').attr('id','sunClip')
       .append('circle').attr('cx',0).attr('cy',0).attr('r', R - 2);
 
-    const sunImg = gSun.append('image')
+    gSun.append('image')
       .attr('href', CONFIG.ownerAvatar)
       .attr('x', -(R - 2)).attr('y', -(R - 2))
       .attr('width', (R - 2) * 2).attr('height', (R - 2) * 2)
-      .attr('clip-path','url(#sunClip)')
-      .attr('preserveAspectRatio','xMidYMid slice');
-
-    // If direct URL fails, try proxy
-    testImageUrl(CONFIG.ownerAvatar).then(ok => {
-      if (!ok) {
-        const ownerUsername = CONFIG.ownerHandle.replace('@','');
-        fetchAvatarViaProxy(ownerUsername).then(url => {
-          if (url) sunImg.attr('href', url);
-          else sunImg.remove();
-        });
-      }
-    });
+      .attr('clip-path','url(#sunClip)');
   }
 
   // Pulse ring
@@ -852,7 +875,7 @@ function drawPlanets() {
       d3.select('defs').append('clipPath').attr('id', clipId)
         .append('circle').attr('r', CONFIG.planetRadius);
 
-      // Avatar image
+      // Avatar image — start with placeholder, real avatar loaded in batch after render
       const imgEl = g.append('image')
         .attr('class','planet-img')
         .attr('href', avatarPlaceholder(follower.name, orbit.color))
@@ -863,8 +886,7 @@ function drawPlanets() {
         .attr('clip-path', `url(#${clipId})`)
         .attr('preserveAspectRatio','xMidYMid slice');
 
-      // Attempt to load a real avatar via unavatar
-      loadAvatar(follower, imgEl, orbit.color);
+      // NOTE: loadAvatar called later in batch via loadAvatarsBatched()
 
       // Ring border
       g.append('circle')
@@ -884,109 +906,82 @@ function drawPlanets() {
   });
 }
 
-// ─── Avatar loading via Claude API proxy ─────────────────
-// Threads blocks direct browser requests (CORS). We use Claude API
-// to fetch the avatar and return it as base64.
-const avatarCache = new Map(); // username -> base64 data URL or null
+// ─── Avatar cache ─────────────────────────────────────────
+const avatarCache = new Map();
 
-async function fetchAvatarViaProxy(username) {
-  if (avatarCache.has(username)) return avatarCache.get(username);
-
-  // Mark as pending to avoid duplicate requests
-  let resolveFn, rejectFn;
-  const p = new Promise((res, rej) => { resolveFn = res; rejectFn = rej; });
-  avatarCache.set(username, p);
-
-  try {
-    const response = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        model: 'claude-sonnet-4-20250514',
-        max_tokens: 100,
-        messages: [{
-          role: 'user',
-          content: `What is the profile picture URL for Threads user @${username}? 
-Reply ONLY with a direct image URL (starting with https://) or the word NULL if not found. No explanation.`
-        }]
-      })
-    });
-
-    if (!response.ok) { resolveFn(null); return null; }
-    const data = await response.json();
-    const text = (data.content?.[0]?.text || '').trim();
-
-    if (!text || text === 'NULL' || !text.startsWith('http')) {
-      resolveFn(null); return null;
-    }
-
-    // Validate the URL actually loads
-    const imgUrl = text.split('\n')[0].trim();
-    const ok = await testImageUrl(imgUrl);
-    const result = ok ? imgUrl : null;
-    resolveFn(result);
-    return result;
-  } catch {
-    resolveFn(null);
-    return null;
+// ─── Load owner avatar on boot ────────────────────────────
+async function loadOwnerAvatar() {
+  const username = CONFIG.ownerHandle.replace('@', '');
+  const urls = [
+    `https://unavatar.io/threads/${username}`,
+    `https://unavatar.io/${username}`,
+  ];
+  for (const url of urls) {
+    try {
+      await new Promise((res, rej) => {
+        const img = new Image();
+        img.crossOrigin = 'anonymous';
+        img.onload = res;
+        img.onerror = rej;
+        setTimeout(rej, 5000);
+        img.src = url;
+      });
+      CONFIG.ownerAvatar = url;
+      return;
+    } catch { /* try next */ }
   }
 }
 
-function testImageUrl(url) {
-  return new Promise(resolve => {
-    const img = new Image();
-    img.onload  = () => resolve(true);
-    img.onerror = () => resolve(false);
-    setTimeout(() => resolve(false), 4000);
-    img.src = url;
-  });
-}
-
-// Queue system with concurrency limit
-const avatarQueue = [];
-let activeAvatarLoads = 0;
-const MAX_CONCURRENT = 3;
-
-function queueAvatarLoad(follower, imgEl) {
-  avatarQueue.push({ follower, imgEl });
-  drainAvatarQueue();
-}
-
-async function drainAvatarQueue() {
-  while (avatarQueue.length > 0 && activeAvatarLoads < MAX_CONCURRENT) {
-    const { follower, imgEl } = avatarQueue.shift();
-    activeAvatarLoads++;
-    loadAvatarForElement(follower, imgEl)
-      .finally(() => { activeAvatarLoads--; drainAvatarQueue(); });
-  }
-}
-
-async function loadAvatarForElement(follower, imgEl) {
+// ─── Avatar loading (multi-strategy, with cache) ──────────
+async function loadAvatar(follower, imgEl, color) {
   const username = follower.handle.replace('@', '');
-  try {
-    const url = await fetchAvatarViaProxy(username);
-    if (url) imgEl.attr('href', url);
-  } catch { /* keep placeholder */ }
-}
 
-// Public entry point called from drawPlanets
-function loadAvatar(follower, imgEl, color) {
-  queueAvatarLoad(follower, imgEl);
-}
+  // Check cache first
+  if (avatarCache.has(username)) {
+    const cached = avatarCache.get(username);
+    if (cached) imgEl.attr('href', cached);
+    return;
+  }
 
-// Preload not needed - queue handles it
-async function preloadAvatars(followers) { /* handled by queue */ }
+  const urls = [
+    `https://unavatar.io/threads/${username}`,
+    `https://unavatar.io/${username}`,
+  ];
+
+  for (const url of urls) {
+    try {
+      await new Promise((res, rej) => {
+        const img = new Image();
+        img.crossOrigin = 'anonymous';
+        img.onload = res;
+        img.onerror = rej;
+        setTimeout(rej, 5000);
+        img.src = url;
+      });
+      avatarCache.set(username, url);
+      imgEl.attr('href', url);
+      return;
+    } catch { /* try next */ }
+  }
+  // Mark as failed so we don't retry
+  avatarCache.set(username, null);
+}
 
 // ─── Animation loop ───────────────────────────────────────
+let lastAnimTime = 0;
 function animate(ts) {
+  animFrameId = requestAnimationFrame(animate);
+  // Cap at 60fps
+  if (ts - lastAnimTime < 16) return;
+  lastAnimTime = ts;
+
   if (!startTime) startTime = ts;
   if (!paused) {
     const elapsed = (ts - startTime) / 1000; // seconds
 
     orbitData.forEach((orbit, oi) => {
       const duration = CONFIG.baseOrbitDuration + oi * CONFIG.durationIncrement;
-      const angularSpeed = (2 * Math.PI) / duration; // radians/sec
-      // alternate direction every other ring for visual interest
+      const angularSpeed = (2 * Math.PI) / duration;
       const direction = oi % 2 === 0 ? 1 : -1;
 
       orbit.planets.forEach((follower, pi) => {
@@ -996,12 +991,10 @@ function animate(ts) {
         const y = orbit.radius * Math.sin(angle);
 
         d3.select(`[data-idx="${follower.idx}"]`)
-          .attr('transform', `translate(${x},${y})`);
+          .attr('transform', `translate(${x.toFixed(2)},${y.toFixed(2)})`);
       });
     });
   }
-
-  animFrameId = requestAnimationFrame(animate);
 }
 
 // ─── Tooltip ──────────────────────────────────────────────
@@ -1014,11 +1007,20 @@ function showTooltip(event, follower, orbit) {
   document.getElementById('tt-date').textContent   = 'Followed on ' + formatDate(follower.ts);
   document.getElementById('tt-link').href          = follower.href || '#';
 
-  // Avatar in tooltip - use cache
+  // Avatar — use cache if available
   const av = document.getElementById('tt-avatar');
   av.src = avatarPlaceholder(follower.name, orbit.color);
-  const username = follower.handle.replace('@','');
-  fetchAvatarViaProxy(username).then(url => { if (url) av.src = url; }).catch(() => {});
+  const username = follower.handle.replace('@', '');
+  if (avatarCache.has(username)) {
+    const cached = avatarCache.get(username);
+    if (cached) av.src = cached;
+  } else {
+    const url = `https://unavatar.io/threads/${username}`;
+    const tryAvatar = new Image();
+    tryAvatar.onload = () => { av.src = url; avatarCache.set(username, url); };
+    tryAvatar.onerror = () => { avatarCache.set(username, null); };
+    tryAvatar.src = url;
+  }
 
   moveTooltip(event);
   tooltip.classList.add('visible');
