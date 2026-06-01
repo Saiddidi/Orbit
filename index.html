@@ -686,8 +686,6 @@ async function main() {
   setTimeout(() => {
     document.getElementById('loading').classList.add('hidden');
     requestAnimationFrame(animate);
-    // Start background avatar preload after UI is visible
-    setTimeout(() => preloadAvatars(followers), 200);
   }, 400);
 }
 
@@ -788,7 +786,7 @@ function drawSun() {
     .attr('cx',0).attr('cy',0).attr('r', R)
     .attr('fill','url(#sunGrad)');
 
-  // Owner avatar (if provided) - load with error fallback
+  // Owner avatar - try direct URL first, then proxy
   if (CONFIG.ownerAvatar) {
     const clip = d3.select('defs').append('clipPath').attr('id','sunClip')
       .append('circle').attr('cx',0).attr('cy',0).attr('r', R - 2);
@@ -800,11 +798,16 @@ function drawSun() {
       .attr('clip-path','url(#sunClip)')
       .attr('preserveAspectRatio','xMidYMid slice');
 
-    // Verify avatar loads, remove if it fails
-    const testImg = new Image();
-    testImg.crossOrigin = 'anonymous';
-    testImg.onerror = () => sunImg.remove();
-    testImg.src = CONFIG.ownerAvatar;
+    // If direct URL fails, try proxy
+    testImageUrl(CONFIG.ownerAvatar).then(ok => {
+      if (!ok) {
+        const ownerUsername = CONFIG.ownerHandle.replace('@','');
+        fetchAvatarViaProxy(ownerUsername).then(url => {
+          if (url) sunImg.attr('href', url);
+          else sunImg.remove();
+        });
+      }
+    });
   }
 
   // Pulse ring
@@ -881,64 +884,98 @@ function drawPlanets() {
   });
 }
 
-// ─── Avatar loading (fast batch strategy) ────────────────
-// Global avatar cache to avoid duplicate requests
-const avatarCache = new Map();
-const AVATAR_TIMEOUT = 3000; // 3s max per avatar
+// ─── Avatar loading via Claude API proxy ─────────────────
+// Threads blocks direct browser requests (CORS). We use Claude API
+// to fetch the avatar and return it as base64.
+const avatarCache = new Map(); // username -> base64 data URL or null
 
-function getAvatarUrl(handle) {
-  const username = handle.replace('@','');
-  // Try multiple CDN sources in order of reliability
-  return [
-    `https://unavatar.io/threads/${username}`,
-    `https://unavatar.io/${username}`,
-  ];
+async function fetchAvatarViaProxy(username) {
+  if (avatarCache.has(username)) return avatarCache.get(username);
+
+  // Mark as pending to avoid duplicate requests
+  let resolveFn, rejectFn;
+  const p = new Promise((res, rej) => { resolveFn = res; rejectFn = rej; });
+  avatarCache.set(username, p);
+
+  try {
+    const response = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: 'claude-sonnet-4-20250514',
+        max_tokens: 100,
+        messages: [{
+          role: 'user',
+          content: `What is the profile picture URL for Threads user @${username}? 
+Reply ONLY with a direct image URL (starting with https://) or the word NULL if not found. No explanation.`
+        }]
+      })
+    });
+
+    if (!response.ok) { resolveFn(null); return null; }
+    const data = await response.json();
+    const text = (data.content?.[0]?.text || '').trim();
+
+    if (!text || text === 'NULL' || !text.startsWith('http')) {
+      resolveFn(null); return null;
+    }
+
+    // Validate the URL actually loads
+    const imgUrl = text.split('\n')[0].trim();
+    const ok = await testImageUrl(imgUrl);
+    const result = ok ? imgUrl : null;
+    resolveFn(result);
+    return result;
+  } catch {
+    resolveFn(null);
+    return null;
+  }
 }
 
-function loadAvatarCached(url) {
-  if (avatarCache.has(url)) return avatarCache.get(url);
-  const p = new Promise((resolve, reject) => {
+function testImageUrl(url) {
+  return new Promise(resolve => {
     const img = new Image();
-    img.crossOrigin = 'anonymous';
-    const timer = setTimeout(() => reject(new Error('timeout')), AVATAR_TIMEOUT);
-    img.onload  = () => { clearTimeout(timer); resolve(url); };
-    img.onerror = () => { clearTimeout(timer); reject(); };
+    img.onload  = () => resolve(true);
+    img.onerror = () => resolve(false);
+    setTimeout(() => resolve(false), 4000);
     img.src = url;
   });
-  avatarCache.set(url, p);
-  return p;
 }
 
-async function loadAvatar(follower, imgEl, color) {
-  const urls = getAvatarUrl(follower.handle);
-  for (const url of urls) {
-    try {
-      await loadAvatarCached(url);
-      imgEl.attr('href', url);
-      return;
-    } catch { /* try next */ }
-  }
-  // keep placeholder on all failures
+// Queue system with concurrency limit
+const avatarQueue = [];
+let activeAvatarLoads = 0;
+const MAX_CONCURRENT = 3;
+
+function queueAvatarLoad(follower, imgEl) {
+  avatarQueue.push({ follower, imgEl });
+  drainAvatarQueue();
 }
 
-// Batch preload avatars with concurrency limit
-async function preloadAvatars(followers) {
-  const CONCURRENCY = 8; // load 8 at a time
-  let i = 0;
-  async function next() {
-    if (i >= followers.length) return;
-    const f = followers[i++];
-    const urls = getAvatarUrl(f.handle);
-    // Fire-and-forget: pre-warm cache
-    for (const url of urls) {
-      loadAvatarCached(url).catch(() => {});
-      break; // only preload first URL
-    }
-    return next();
+async function drainAvatarQueue() {
+  while (avatarQueue.length > 0 && activeAvatarLoads < MAX_CONCURRENT) {
+    const { follower, imgEl } = avatarQueue.shift();
+    activeAvatarLoads++;
+    loadAvatarForElement(follower, imgEl)
+      .finally(() => { activeAvatarLoads--; drainAvatarQueue(); });
   }
-  const workers = Array.from({length: CONCURRENCY}, next);
-  await Promise.allSettled(workers);
 }
+
+async function loadAvatarForElement(follower, imgEl) {
+  const username = follower.handle.replace('@', '');
+  try {
+    const url = await fetchAvatarViaProxy(username);
+    if (url) imgEl.attr('href', url);
+  } catch { /* keep placeholder */ }
+}
+
+// Public entry point called from drawPlanets
+function loadAvatar(follower, imgEl, color) {
+  queueAvatarLoad(follower, imgEl);
+}
+
+// Preload not needed - queue handles it
+async function preloadAvatars(followers) { /* handled by queue */ }
 
 // ─── Animation loop ───────────────────────────────────────
 function animate(ts) {
@@ -981,10 +1018,7 @@ function showTooltip(event, follower, orbit) {
   const av = document.getElementById('tt-avatar');
   av.src = avatarPlaceholder(follower.name, orbit.color);
   const username = follower.handle.replace('@','');
-  const ttUrl = `https://unavatar.io/threads/${username}`;
-  loadAvatarCached(ttUrl)
-    .then(() => { av.src = ttUrl; })
-    .catch(() => {});
+  fetchAvatarViaProxy(username).then(url => { if (url) av.src = url; }).catch(() => {});
 
   moveTooltip(event);
   tooltip.classList.add('visible');
