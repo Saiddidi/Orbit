@@ -463,25 +463,21 @@
 
 <script>
 /* ═══════════════════════════════════════════════════════════
-   ORBIT — Social Galaxy Visualizer (Battery Optimized)
+   ORBIT — Social Galaxy Visualizer (Battery & Network Optimized)
    ═══════════════════════════════════════════════════════════ */
 
-// ─── Config ───────────────────────────────────────────────
 const CONFIG = {
   ownerName:    "You",
   ownerHandle:  "@you",
   ownerAvatar:  "",  
-
   sunRadius:         38,
   firstOrbitRadius:  130,
   orbitGap:          100,   
   planetRadius:      22,    
   minPlanetsPerRing: 4,
   planetsPerRingFactor: 6.5, 
-
   baseOrbitDuration: 60,    
   durationIncrement: 30,    
-
   avatarColors: [
     '#7eb8ff','#b48cff','#ff8caa','#ffd060',
     '#6effc8','#ff9f5a','#5af0ff','#e87bff'
@@ -495,20 +491,21 @@ const ORBIT_COLORS = [
   '#6effc8','#3ed4a0',
 ];
 
-// ─── Globals ──────────────────────────────────────────────
 let svgEl, zoom, gMain, gOrbits, gSun, gPlanets;
 let followers = [];
 let orbitData = [];
-// التعديل 3: يبدأ الأنميشن متوقفاً
 let paused = true; 
 let animFrameId;
 let startTime = null;
 let planetAngles = [];  
-let accumulatedTime = 0; // لحفظ الوقت المقطوع عند الإيقاف
-
-// متغيرات للتحكم بسرعة الإطارات (التعديل 2)
-let fpsInterval = 1000 / 30; // 30 إطار في الثانية
+let accumulatedTime = 0; 
+let fpsInterval = 1000 / 30; 
 let then = performance.now();
+
+// ─── إعدادات طابور تحميل الصور (التحسين الجديد) ────────────
+const avatarQueue = [];
+const MAX_CONCURRENT_LOADS = 4; // الحد الأقصى للصور المحملة في نفس اللحظة
+let activeLoads = 0;
 
 // ─── Starfield ────────────────────────────────────────────
 function initStarfield() {
@@ -519,8 +516,7 @@ function initStarfield() {
   function resize() {
     W = canvas.width  = window.innerWidth;
     H = canvas.height = window.innerHeight;
-    // التعديل 1: تقليل عدد النجوم من 220 إلى 60 فقط لتخفيف العبء الرسومي
-    stars = Array.from({length: 60}, () => ({
+    stars = Array.from({length: 60}, () => ({ // تم الحفاظ على تقليل النجوم لـ 60
       x: Math.random() * W,
       y: Math.random() * H,
       r: Math.random() * 1.4 + 0.2,
@@ -551,18 +547,13 @@ function initStarfield() {
 function decodeUnicode(str) {
   if (!str) return '';
   try {
-    return decodeURIComponent(
-      str.replace(/\\u([0-9a-fA-F]{4})/g, (_, hex) =>
-        String.fromCodePoint(parseInt(hex, 16))
-      )
-    );
+    return decodeURIComponent(str.replace(/\\u([0-9a-fA-F]{4})/g, (_, hex) => String.fromCodePoint(parseInt(hex, 16))));
   } catch { return str; }
 }
 
 function formatDate(ts) {
   if (!ts) return 'Unknown date';
-  const d = new Date(ts * 1000);
-  return d.toLocaleDateString('en-US', {year:'numeric',month:'short',day:'numeric'});
+  return new Date(ts * 1000).toLocaleDateString('en-US', {year:'numeric',month:'short',day:'numeric'});
 }
 
 function orbitColor(ringIndex) {
@@ -570,8 +561,7 @@ function orbitColor(ringIndex) {
 }
 
 function avatarPlaceholder(name, color) {
-  const initials = (name || '?').replace(/[^a-zA-Z\u00C0-\u024F\u0400-\u04FF]/g,'')
-    .slice(0, 2).toUpperCase() || '??';
+  const initials = (name || '?').replace(/[^a-zA-Z\u00C0-\u024F\u0400-\u04FF]/g,'').slice(0, 2).toUpperCase() || '??';
   const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="44" height="44">
     <circle cx="22" cy="22" r="22" fill="${color}22"/>
     <text x="22" y="27" text-anchor="middle" fill="${color}" font-size="16" font-family="Outfit,sans-serif" font-weight="600">${initials}</text>
@@ -579,28 +569,18 @@ function avatarPlaceholder(name, color) {
   return 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svg);
 }
 
-// ─── Layout: distribute followers across rings ─────────────
 function buildOrbitLayout(followers) {
   const orbits = [];
-  let i = 0;
-  let ringIndex = 0;
-
+  let i = 0, ringIndex = 0;
   while (i < followers.length) {
     const r = CONFIG.firstOrbitRadius + ringIndex * CONFIG.orbitGap;
-    const circumference = 2 * Math.PI * r;
-    const capacity = Math.max(
-      CONFIG.minPlanetsPerRing,
-      Math.floor(circumference / (CONFIG.planetRadius * 2 * CONFIG.planetsPerRingFactor))
-    );
-    const slice = followers.slice(i, i + capacity);
-    orbits.push({ ringIndex, radius: r, color: orbitColor(ringIndex), planets: slice });
-    i += capacity;
-    ringIndex++;
+    const capacity = Math.max(CONFIG.minPlanetsPerRing, Math.floor((2 * Math.PI * r) / (CONFIG.planetRadius * 2 * CONFIG.planetsPerRingFactor)));
+    orbits.push({ ringIndex, radius: r, color: orbitColor(ringIndex), planets: followers.slice(i, i + capacity) });
+    i += capacity; ringIndex++;
   }
   return orbits;
 }
 
-// ─── Progress ─────────────────────────────────────────────
 function setProgress(pct, label) {
   document.getElementById('progress-fill').style.width = pct + '%';
   if (label) document.getElementById('loading-sub').textContent = label;
@@ -617,42 +597,27 @@ async function main() {
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     raw = await res.json();
   } catch (e) {
-    console.error('Failed to load followers.json:', e);
     document.getElementById('loading').classList.add('hidden');
     document.getElementById('error-panel').classList.add('show');
     return;
   }
 
-  setProgress(25, 'Parsing follower data…');
-
+  setProgress(40, 'Parsing follower data…');
   const key = Object.keys(raw).find(k => k.includes('followers'));
   const items = (key ? raw[key] : raw) || [];
 
   followers = items.map((item, idx) => {
     const sd = (item.string_list_data || [])[0] || {};
-    const name = decodeUnicode(sd.value || sd.title || 'Unknown');
-    const handle = sd.value ? '@' + sd.value : '@unknown';
-    const href = sd.href || '#';
-    const ts = sd.timestamp || 0;
-    const color = CONFIG.avatarColors[idx % CONFIG.avatarColors.length];
-    return { name, handle, href, ts, color, idx };
+    return { 
+      name: decodeUnicode(sd.value || sd.title || 'Unknown'), 
+      handle: sd.value ? '@' + sd.value : '@unknown', 
+      href: sd.href || '#', ts: sd.timestamp || 0, 
+      color: CONFIG.avatarColors[idx % CONFIG.avatarColors.length], idx 
+    };
   });
 
-  setProgress(50, `Processing ${followers.length} followers…`);
-
+  setProgress(70, 'Rendering galaxy…');
   orbitData = buildOrbitLayout(followers);
-
-  planetAngles = followers.map(() => 0);
-  let pIdx = 0;
-  orbitData.forEach(orbit => {
-    const n = orbit.planets.length;
-    orbit.planets.forEach((p, i) => {
-      planetAngles[p.idx] = (2 * Math.PI * i) / n;
-    });
-    pIdx += n;
-  });
-
-  setProgress(75, 'Rendering galaxy…');
 
   initSVG();
   drawOrbits();
@@ -661,14 +626,12 @@ async function main() {
   setupControls();
 
   setProgress(100, 'Done!');
-
   document.getElementById('follower-count').textContent = followers.length;
   document.getElementById('orbit-count').textContent = orbitData.length;
   document.getElementById('hud').style.display = '';
 
   setTimeout(() => {
     document.getElementById('loading').classList.add('hidden');
-    // تشغيل الأنميشن فوراً (لرسم الكواكب في مكانها) ولكنه سيكون بحالة paused
     requestAnimationFrame(animate); 
   }, 400);
 }
@@ -681,78 +644,47 @@ function initSVG() {
   const sunGrad = defs.append('radialGradient').attr('id','sunGrad').attr('cx','40%').attr('cy','38%').attr('r','60%');
   sunGrad.append('stop').attr('offset','0%').attr('stop-color','#fff9e8');
   sunGrad.append('stop').attr('offset','40%').attr('stop-color','#ffd060');
-  sunGrad.append('stop').attr('offset','75%').attr('stop-color','#ff8c00');
   sunGrad.append('stop').attr('offset','100%').attr('stop-color','#cc3300');
 
   const coronaGrad = defs.append('radialGradient').attr('id','coronaGrad').attr('cx','50%').attr('cy','50%').attr('r','50%');
   coronaGrad.append('stop').attr('offset','30%').attr('stop-color','rgba(255,160,0,0.35)');
   coronaGrad.append('stop').attr('offset','100%').attr('stop-color','rgba(255,80,0,0)');
 
-  const filter = defs.append('filter').attr('id','sunGlow').attr('x','-150%').attr('y','-150%').attr('width','400%').attr('height','400%');
-  filter.append('feGaussianBlur').attr('in','SourceGraphic').attr('stdDeviation','14').attr('result','blur');
-  const feMerge = filter.append('feMerge');
-  feMerge.append('feMergeNode').attr('in','blur');
-  feMerge.append('feMergeNode').attr('in','SourceGraphic');
-
   const pGlow = defs.append('filter').attr('id','planetGlow').attr('x','-80%').attr('y','-80%').attr('width','260%').attr('height','260%');
   pGlow.append('feGaussianBlur').attr('in','SourceGraphic').attr('stdDeviation','5').attr('result','blur');
-  const pm = pGlow.append('feMerge');
-  pm.append('feMergeNode').attr('in','blur');
-  pm.append('feMergeNode').attr('in','SourceGraphic');
+  const pm = pGlow.append('feMerge'); pm.append('feMergeNode').attr('in','blur'); pm.append('feMergeNode').attr('in','SourceGraphic');
 
   defs.append('clipPath').attr('id','planetClip').append('circle').attr('r', CONFIG.planetRadius);
 
   gMain = svgEl.append('g').attr('id','g-main');
-  gOrbits  = gMain.append('g').attr('id','g-orbits');
+  gOrbits = gMain.append('g').attr('id','g-orbits');
   gPlanets = gMain.append('g').attr('id','g-planets');
-  gSun     = gMain.append('g').attr('id','g-sun');
+  gSun = gMain.append('g').attr('id','g-sun');
 
   zoom = d3.zoom().scaleExtent([0.12, 5]).on('zoom', e => gMain.attr('transform', e.transform));
   svgEl.call(zoom);
-
-  const W = window.innerWidth, H = window.innerHeight;
-  svgEl.call(zoom.transform, d3.zoomIdentity.translate(W / 2, H / 2));
-
-  window.addEventListener('resize', () => {
-    const W2 = window.innerWidth, H2 = window.innerHeight;
-    svgEl.call(zoom.transform, d3.zoomIdentity.translate(W2 / 2, H2 / 2));
-  });
+  svgEl.call(zoom.transform, d3.zoomIdentity.translate(window.innerWidth / 2, window.innerHeight / 2));
 }
 
 function drawOrbits() {
   orbitData.forEach((orbit, i) => {
-    gOrbits.append('circle')
-      .attr('class','orbit-ring')
-      .attr('cx', 0).attr('cy', 0)
-      .attr('r', orbit.radius)
-      .style('animation-delay', (i * 0.5) + 's');
+    gOrbits.append('circle').attr('class','orbit-ring').attr('cx', 0).attr('cy', 0).attr('r', orbit.radius).style('animation-delay', (i * 0.5) + 's');
   });
 }
 
 function drawSun() {
   const R = CONFIG.sunRadius;
   gSun.append('circle').attr('cx',0).attr('cy',0).attr('r', R * 2.8).attr('fill','url(#coronaGrad)');
-  gSun.append('circle').attr('cx',0).attr('cy',0).attr('r', R).attr('fill','url(#sunGrad)').attr('filter','url(#sunGlow)').attr('opacity','0.5');
   gSun.append('circle').attr('cx',0).attr('cy',0).attr('r', R).attr('fill','url(#sunGrad)');
-
-  if (CONFIG.ownerAvatar) {
-    const clip = d3.select('defs').append('clipPath').attr('id','sunClip').append('circle').attr('cx',0).attr('cy',0).attr('r', R - 2);
-    gSun.append('image')
-      .attr('href', CONFIG.ownerAvatar).attr('x', -(R - 2)).attr('y', -(R - 2))
-      .attr('width', (R - 2) * 2).attr('height', (R - 2) * 2).attr('clip-path','url(#sunClip)');
-  }
-
-  const pulseRing = gSun.append('circle').attr('cx',0).attr('cy',0).attr('r', R + 4)
-    .attr('fill','none').attr('stroke','rgba(255,200,0,0.4)').attr('stroke-width','2');
-
+  
+  const pulseRing = gSun.append('circle').attr('cx',0).attr('cy',0).attr('r', R + 4).attr('fill','none').attr('stroke','rgba(255,200,0,0.4)').attr('stroke-width','2');
   function pulsate() {
-    pulseRing.attr('r', R + 4).attr('opacity', 0.6)
-      .transition().duration(2000).ease(d3.easeSinInOut).attr('r', R + 22).attr('opacity', 0)
-      .on('end', pulsate);
+    pulseRing.attr('r', R + 4).attr('opacity', 0.6).transition().duration(2000).ease(d3.easeSinInOut).attr('r', R + 22).attr('opacity', 0).on('end', pulsate);
   }
   pulsate();
 }
 
+// ─── الرسم وإضافة الصور للطابور بدلاً من تحميلها فوراً ─────────
 function drawPlanets() {
   orbitData.forEach((orbit, oi) => {
     orbit.planets.forEach((follower, pi) => {
@@ -760,16 +692,18 @@ function drawPlanets() {
         .attr('class','planet-group').attr('data-idx', follower.idx).attr('data-orbit', oi).attr('data-orbit-pi', pi);
 
       g.append('circle').attr('class','planet-glow').attr('r', CONFIG.planetRadius + 6).attr('fill', orbit.color + '30').attr('filter','url(#planetGlow)');
+      
       const clipId = `pc-${follower.idx}`;
       d3.select('defs').append('clipPath').attr('id', clipId).append('circle').attr('r', CONFIG.planetRadius);
 
       const imgEl = g.append('image').attr('class','planet-img')
-        .attr('href', avatarPlaceholder(follower.name, orbit.color))
+        .attr('href', avatarPlaceholder(follower.name, orbit.color)) // نضع الصورة الافتراضية أولاً
         .attr('x', -CONFIG.planetRadius).attr('y', -CONFIG.planetRadius)
-        .attr('width',  CONFIG.planetRadius * 2).attr('height', CONFIG.planetRadius * 2)
+        .attr('width', CONFIG.planetRadius * 2).attr('height', CONFIG.planetRadius * 2)
         .attr('clip-path', `url(#${clipId})`).attr('preserveAspectRatio','xMidYMid slice');
 
-      loadAvatar(follower, imgEl, orbit.color);
+      // إرسال الصورة إلى الطابور بدلاً من تحميلها مباشرة
+      queueAvatarLoad(follower, imgEl);
 
       g.append('circle').attr('class','planet-ring').attr('r', CONFIG.planetRadius).attr('fill','none').attr('stroke', orbit.color).attr('stroke-width','2');
 
@@ -781,46 +715,80 @@ function drawPlanets() {
   });
 }
 
-async function loadAvatar(follower, imgEl, color) {
+// ─── محرك الطابور لتحميل الصور بذكاء وتوفير البطارية ────────
+function queueAvatarLoad(follower, imgEl) {
+  avatarQueue.push({ follower, imgEl });
+  processAvatarQueue();
+}
+
+async function processAvatarQueue() {
+  // إذا وصلنا للحد الأقصى للتحميلات المتزامنة أو الطابور فارغ، نتوقف
+  if (activeLoads >= MAX_CONCURRENT_LOADS || avatarQueue.length === 0) return;
+
+  activeLoads++;
+  const { follower, imgEl } = avatarQueue.shift();
+
+  await loadAvatarOptimized(follower, imgEl);
+
+  activeLoads--;
+  // معالجة العنصر التالي في الطابور تلقائياً
+  processAvatarQueue();
+}
+
+async function loadAvatarOptimized(follower, imgEl) {
   const username = follower.handle.replace('@','');
   const url1 = `https://unavatar.io/threads/${username}`;
   const url2 = `https://unavatar.io/${username}`;
+
   try {
-    const img = new Image(); img.crossOrigin = 'anonymous';
-    await new Promise((res, rej) => { img.onload = res; img.onerror = rej; img.src = url1; setTimeout(rej, 4000); });
+    await tryLoadImage(url1);
     imgEl.attr('href', url1);
   } catch {
     try {
-      const img2 = new Image(); img2.crossOrigin = 'anonymous';
-      await new Promise((res, rej) => { img2.onload = res; img2.onerror = rej; img2.src = url2; setTimeout(rej, 3000); });
+      await tryLoadImage(url2);
       imgEl.attr('href', url2);
-    } catch { }
+    } catch {
+      // إبقاء الصورة الافتراضية (SVG) في حال فشل التحميل تماماً
+    }
   }
 }
 
-// ─── التعديل 2: أنميشن موفر للطاقة (Throttling FPS) ──────
-let lastTime = 0;
+// دالة فحص الصورة وإدارة الذاكرة لتنظيف (RAM)
+function tryLoadImage(url) {
+  return new Promise((resolve, reject) => {
+    let img = new Image();
+    img.crossOrigin = 'anonymous';
+    
+    // تنظيف الذاكرة بعد الاستخدام
+    const cleanup = () => {
+      img.onload = null;
+      img.onerror = null;
+      img = null; // السماح لـ Garbage Collector بحذف الصورة من الذاكرة العشوائية
+    };
+    
+    img.onload = () => { cleanup(); resolve(); };
+    img.onerror = () => { cleanup(); reject(); };
+    img.src = url;
+    
+    // تحديد مهلة زمنية (Timeout) لمنع تعليق الشبكة للأبد
+    setTimeout(() => { cleanup(); reject(new Error("Timeout")); }, 3000);
+  });
+}
 
+// ─── أنميشن موفر للطاقة ──────────────────────────────────
+let lastTime = 0;
 function animate(ts) {
   animFrameId = requestAnimationFrame(animate);
-
   if (!startTime) startTime = ts;
   
   let now = ts;
   let elapsedFrame = now - then;
 
-  // التحقق من أن الوقت المنقضي كافٍ لرسم إطار جديد (يحدها بـ 30 إطار/ثانية)
   if (elapsedFrame > fpsInterval) {
     then = now - (elapsedFrame % fpsInterval);
 
-    if (!paused) {
-      // حساب الوقت المستغرق الفعلي، مع إضافة الوقت المتراكم قبل الإيقاف المؤقت
-      let delta = (ts - lastTime) / 1000;
-      accumulatedTime += delta;
-    }
+    if (!paused) accumulatedTime += (ts - lastTime) / 1000;
     
-    // سواء كان التطبيق متوقفاً أم لا، يتم رسم الكواكب حسب الوقت المتراكم
-    // (إذا كان متوقفاً، الوقت المتراكم لا يزيد، فتبقى الكواكب في مكانها)
     orbitData.forEach((orbit, oi) => {
       const duration = CONFIG.baseOrbitDuration + oi * CONFIG.durationIncrement;
       const angularSpeed = (2 * Math.PI) / duration; 
@@ -831,35 +799,31 @@ function animate(ts) {
         const angle = baseAngle + direction * angularSpeed * accumulatedTime;
         const x = orbit.radius * Math.cos(angle);
         const y = orbit.radius * Math.sin(angle);
-
-        d3.select(`[data-idx="${follower.idx}"]`)
-          .attr('transform', `translate(${x},${y})`);
+        d3.select(`[data-idx="${follower.idx}"]`).attr('transform', `translate(${x},${y})`);
       });
     });
   }
-  
-  lastTime = ts; // حفظ آخر طابع زمني لاستخدامه في الإطار القادم
+  lastTime = ts;
 }
 
+// ─── Tooltip ──────────────────────────────────────────────
 const tooltip = document.getElementById('tooltip');
-let tooltipVisible = false;
-
 function showTooltip(event, follower, orbit) {
-  document.getElementById('tt-name').textContent   = follower.name;
+  document.getElementById('tt-name').textContent = follower.name;
   document.getElementById('tt-handle').textContent = follower.handle;
-  document.getElementById('tt-date').textContent   = 'Followed on ' + formatDate(follower.ts);
-  document.getElementById('tt-link').href          = follower.href || '#';
-
+  document.getElementById('tt-date').textContent = 'Followed on ' + formatDate(follower.ts);
+  
   const av = document.getElementById('tt-avatar');
   av.src = avatarPlaceholder(follower.name, orbit.color);
   const username = follower.handle.replace('@','');
-  const tryAvatar = new Image();
-  tryAvatar.onload = () => { av.src = `https://unavatar.io/threads/${username}`; };
+  
+  // تحميل صورة الـ Tooltip بشكل مستقل لتكون سريعة للمستخدم
+  let tryAvatar = new Image();
+  tryAvatar.onload = () => { av.src = `https://unavatar.io/threads/${username}`; tryAvatar = null; };
   tryAvatar.src = `https://unavatar.io/threads/${username}`;
 
   moveTooltip(event);
   tooltip.classList.add('visible');
-  tooltipVisible = true;
 }
 
 function moveTooltip(event) {
@@ -873,32 +837,24 @@ function moveTooltip(event) {
   tooltip.style.top  = y + 'px';
 }
 
-function hideTooltip() {
-  tooltip.classList.remove('visible');
-  tooltipVisible = false;
-}
+function hideTooltip() { tooltip.classList.remove('visible'); }
 
 // ─── Controls ─────────────────────────────────────────────
 function setupControls() {
-  document.getElementById('btn-zoom-in').addEventListener('click', () => {
-    svgEl.transition().call(zoom.scaleBy, 1.4);
-  });
-  document.getElementById('btn-zoom-out').addEventListener('click', () => {
-    svgEl.transition().call(zoom.scaleBy, 0.7);
-  });
+  document.getElementById('btn-zoom-in').addEventListener('click', () => svgEl.transition().call(zoom.scaleBy, 1.4));
+  document.getElementById('btn-zoom-out').addEventListener('click', () => svgEl.transition().call(zoom.scaleBy, 0.7));
   document.getElementById('btn-reset').addEventListener('click', () => {
-    const W = window.innerWidth, H = window.innerHeight;
-    svgEl.transition().duration(600)
-      .call(zoom.transform, d3.zoomIdentity.translate(W / 2, H / 2));
+    svgEl.transition().duration(600).call(zoom.transform, d3.zoomIdentity.translate(window.innerWidth / 2, window.innerHeight / 2));
   });
   document.getElementById('btn-pause').addEventListener('click', function() {
     paused = !paused;
     this.textContent = paused ? '▶' : '⏸';
-    // ملاحظة: لا نحتاج لإعادة تعيين startTime بفضل التحسين الذي أجريناه على دالة animate
   });
 }
 
 main();
+
+   
 </script>
 </body>
 </html>
