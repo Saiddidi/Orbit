@@ -78,7 +78,7 @@
 
   /* ─── Sun group ─── */
   .sun-corona {
-    fill: radial-gradient(circle, var(--sun-core), transparent);
+    fill: url(#coronaGrad);
     animation: corona-pulse 3s ease-in-out infinite alternate;
   }
   @keyframes corona-pulse {
@@ -387,15 +387,6 @@
     font-size: 12px;
   }
 
-  /* ─── Animate orbit nodes ─── */
-  .planet-orbit-path {
-    animation-name: orbit-spin;
-    animation-timing-function: linear;
-    animation-iteration-count: infinite;
-    transform-box: fill-box;
-    transform-origin: center;
-  }
-
   /* ─── Responsive ─── */
   @media (max-width: 600px) {
     #hud { padding: 8px 16px; gap: 12px; }
@@ -404,6 +395,7 @@
     .ctrl-btn { width: 36px; height: 36px; font-size: 16px; }
   }
 </style>
+<base target="_blank">
 </head>
 <body>
 
@@ -411,7 +403,7 @@
 
 <div id="loading">
   <div class="loader-sun"></div>
-  <div id="loading-text">Mapping your galaxy…</div>
+  <div id="loading-text">Mapping your galaxy...</div>
   <div class="progress-bar"><div class="progress-fill" id="progress-fill"></div></div>
   <div id="loading-sub">Loading follower data and rendering orbits</div>
 </div>
@@ -451,7 +443,8 @@
   <button class="ctrl-btn" id="btn-zoom-in"  title="Zoom In">+</button>
   <button class="ctrl-btn" id="btn-zoom-out" title="Zoom Out">−</button>
   <button class="ctrl-btn" id="btn-reset"    title="Reset View">⌖</button>
-  <button class="ctrl-btn" id="btn-pause"    title="Toggle Animation">▶</button> </div>
+  <button class="ctrl-btn" id="btn-pause"    title="Toggle Animation">▶</button>
+</div>
 
 <div id="legend">
   <div style="font-family:var(--font-display);font-size:10px;letter-spacing:.1em;color:var(--text-primary);margin-bottom:4px;">ORBITS</div>
@@ -469,15 +462,15 @@
 const CONFIG = {
   ownerName:    "You",
   ownerHandle:  "@you",
-  ownerAvatar:  "",  
+  ownerAvatar:  "",
   sunRadius:         38,
   firstOrbitRadius:  130,
-  orbitGap:          100,   
-  planetRadius:      22,    
+  orbitGap:          100,
+  planetRadius:      22,
   minPlanetsPerRing: 4,
-  planetsPerRingFactor: 6.5, 
-  baseOrbitDuration: 60,    
-  durationIncrement: 30,    
+  planetsPerRingFactor: 6.5,
+  baseOrbitDuration: 60,
+  durationIncrement: 30,
   avatarColors: [
     '#7eb8ff','#b48cff','#ff8caa','#ffd060',
     '#6effc8','#ff9f5a','#5af0ff','#e87bff'
@@ -494,17 +487,17 @@ const ORBIT_COLORS = [
 let svgEl, zoom, gMain, gOrbits, gSun, gPlanets;
 let followers = [];
 let orbitData = [];
-let paused = true; 
+let paused = true;
 let animFrameId;
 let startTime = null;
-let planetAngles = [];  
-let accumulatedTime = 0; 
-let fpsInterval = 1000 / 30; 
+let accumulatedTime = 0;
+let fpsInterval = 1000 / 30;
 let then = performance.now();
+let lastTime = performance.now(); // FIX: initialize to current time, not 0
 
-// ─── إعدادات طابور تحميل الصور (التحسين الجديد) ────────────
+// ─── Smart avatar loading queue ──────────────────────────
 const avatarQueue = [];
-const MAX_CONCURRENT_LOADS = 4; // الحد الأقصى للصور المحملة في نفس اللحظة
+const MAX_CONCURRENT_LOADS = 4;
 let activeLoads = 0;
 
 // ─── Starfield ────────────────────────────────────────────
@@ -516,7 +509,7 @@ function initStarfield() {
   function resize() {
     W = canvas.width  = window.innerWidth;
     H = canvas.height = window.innerHeight;
-    stars = Array.from({length: 60}, () => ({ // تم الحفاظ على تقليل النجوم لـ 60
+    stars = Array.from({length: 60}, () => ({
       x: Math.random() * W,
       y: Math.random() * H,
       r: Math.random() * 1.4 + 0.2,
@@ -589,7 +582,7 @@ function setProgress(pct, label) {
 // ─── Main fetch & render flow ─────────────────────────────
 async function main() {
   initStarfield();
-  setProgress(5, 'Fetching followers.json…');
+  setProgress(5, 'Fetching followers.json...');
 
   let raw;
   try {
@@ -602,21 +595,21 @@ async function main() {
     return;
   }
 
-  setProgress(40, 'Parsing follower data…');
+  setProgress(40, 'Parsing follower data...');
   const key = Object.keys(raw).find(k => k.includes('followers'));
   const items = (key ? raw[key] : raw) || [];
 
   followers = items.map((item, idx) => {
     const sd = (item.string_list_data || [])[0] || {};
-    return { 
-      name: decodeUnicode(sd.value || sd.title || 'Unknown'), 
-      handle: sd.value ? '@' + sd.value : '@unknown', 
-      href: sd.href || '#', ts: sd.timestamp || 0, 
-      color: CONFIG.avatarColors[idx % CONFIG.avatarColors.length], idx 
+    return {
+      name: decodeUnicode(sd.value || sd.title || 'Unknown'),
+      handle: sd.value ? '@' + sd.value : '@unknown',
+      href: sd.href || '#', ts: sd.timestamp || 0,
+      color: CONFIG.avatarColors[idx % CONFIG.avatarColors.length], idx
     };
   });
 
-  setProgress(70, 'Rendering galaxy…');
+  setProgress(70, 'Rendering galaxy...');
   orbitData = buildOrbitLayout(followers);
 
   initSVG();
@@ -632,7 +625,7 @@ async function main() {
 
   setTimeout(() => {
     document.getElementById('loading').classList.add('hidden');
-    requestAnimationFrame(animate); 
+    requestAnimationFrame(animate);
   }, 400);
 }
 
@@ -676,7 +669,7 @@ function drawSun() {
   const R = CONFIG.sunRadius;
   gSun.append('circle').attr('cx',0).attr('cy',0).attr('r', R * 2.8).attr('fill','url(#coronaGrad)');
   gSun.append('circle').attr('cx',0).attr('cy',0).attr('r', R).attr('fill','url(#sunGrad)');
-  
+
   const pulseRing = gSun.append('circle').attr('cx',0).attr('cy',0).attr('r', R + 4).attr('fill','none').attr('stroke','rgba(255,200,0,0.4)').attr('stroke-width','2');
   function pulsate() {
     pulseRing.attr('r', R + 4).attr('opacity', 0.6).transition().duration(2000).ease(d3.easeSinInOut).attr('r', R + 22).attr('opacity', 0).on('end', pulsate);
@@ -684,7 +677,7 @@ function drawSun() {
   pulsate();
 }
 
-// ─── الرسم وإضافة الصور للطابور بدلاً من تحميلها فوراً ─────────
+// ─── Draw planets with lazy avatar loading ─────────────────
 function drawPlanets() {
   orbitData.forEach((orbit, oi) => {
     orbit.planets.forEach((follower, pi) => {
@@ -692,47 +685,48 @@ function drawPlanets() {
         .attr('class','planet-group').attr('data-idx', follower.idx).attr('data-orbit', oi).attr('data-orbit-pi', pi);
 
       g.append('circle').attr('class','planet-glow').attr('r', CONFIG.planetRadius + 6).attr('fill', orbit.color + '30').attr('filter','url(#planetGlow)');
-      
+
       const clipId = `pc-${follower.idx}`;
       d3.select('defs').append('clipPath').attr('id', clipId).append('circle').attr('r', CONFIG.planetRadius);
 
       const imgEl = g.append('image').attr('class','planet-img')
-        .attr('href', avatarPlaceholder(follower.name, orbit.color)) // نضع الصورة الافتراضية أولاً
+        .attr('href', avatarPlaceholder(follower.name, orbit.color))
         .attr('x', -CONFIG.planetRadius).attr('y', -CONFIG.planetRadius)
         .attr('width', CONFIG.planetRadius * 2).attr('height', CONFIG.planetRadius * 2)
         .attr('clip-path', `url(#${clipId})`).attr('preserveAspectRatio','xMidYMid slice');
 
-      // إرسال الصورة إلى الطابور بدلاً من تحميلها مباشرة
       queueAvatarLoad(follower, imgEl);
 
       g.append('circle').attr('class','planet-ring').attr('r', CONFIG.planetRadius).attr('fill','none').attr('stroke', orbit.color).attr('stroke-width','2');
 
-      g.on('mouseenter', function(event) { showTooltip(event, follower, orbit, this); })
+      g.on('mouseenter', function(event) { showTooltip(event, follower, orbit); })
        .on('mousemove',  function(event) { moveTooltip(event); })
        .on('mouseleave', function()      { hideTooltip(); })
-       .on('touchstart', function(event) { event.preventDefault(); showTooltip(event.touches[0], follower, orbit, this); }, { passive: false });
+       .on('touchstart', function(event) { event.preventDefault(); showTooltip(event.touches[0], follower, orbit); }, { passive: false });
     });
   });
 }
 
-// ─── محرك الطابور لتحميل الصور بذكاء وتوفير البطارية ────────
+// ─── Smart avatar loading queue ───────────────────────────
 function queueAvatarLoad(follower, imgEl) {
   avatarQueue.push({ follower, imgEl });
   processAvatarQueue();
 }
 
 async function processAvatarQueue() {
-  // إذا وصلنا للحد الأقصى للتحميلات المتزامنة أو الطابور فارغ، نتوقف
   if (activeLoads >= MAX_CONCURRENT_LOADS || avatarQueue.length === 0) return;
 
   activeLoads++;
   const { follower, imgEl } = avatarQueue.shift();
 
-  await loadAvatarOptimized(follower, imgEl);
-
-  activeLoads--;
-  // معالجة العنصر التالي في الطابور تلقائياً
-  processAvatarQueue();
+  try {
+    await loadAvatarOptimized(follower, imgEl);
+  } catch (err) {
+    // keep placeholder on failure
+  } finally {
+    activeLoads--;
+    processAvatarQueue(); // process next
+  }
 }
 
 async function loadAvatarOptimized(follower, imgEl) {
@@ -748,50 +742,49 @@ async function loadAvatarOptimized(follower, imgEl) {
       await tryLoadImage(url2);
       imgEl.attr('href', url2);
     } catch {
-      // إبقاء الصورة الافتراضية (SVG) في حال فشل التحميل تماماً
+      // keep placeholder
     }
   }
 }
 
-// دالة فحص الصورة وإدارة الذاكرة لتنظيف (RAM)
 function tryLoadImage(url) {
   return new Promise((resolve, reject) => {
-    let img = new Image();
+    const img = new Image();
     img.crossOrigin = 'anonymous';
-    
-    // تنظيف الذاكرة بعد الاستخدام
+
     const cleanup = () => {
       img.onload = null;
       img.onerror = null;
-      img = null; // السماح لـ Garbage Collector بحذف الصورة من الذاكرة العشوائية
     };
-    
+
     img.onload = () => { cleanup(); resolve(); };
     img.onerror = () => { cleanup(); reject(); };
     img.src = url;
-    
-    // تحديد مهلة زمنية (Timeout) لمنع تعليق الشبكة للأبد
+
     setTimeout(() => { cleanup(); reject(new Error("Timeout")); }, 3000);
   });
 }
 
-// ─── أنميشن موفر للطاقة ──────────────────────────────────
-let lastTime = 0;
+// ─── Energy-efficient animation loop ──────────────────────
 function animate(ts) {
   animFrameId = requestAnimationFrame(animate);
   if (!startTime) startTime = ts;
-  
-  let now = ts;
-  let elapsedFrame = now - then;
+
+  const now = ts;
+  const elapsedFrame = now - then;
 
   if (elapsedFrame > fpsInterval) {
     then = now - (elapsedFrame % fpsInterval);
 
-    if (!paused) accumulatedTime += (ts - lastTime) / 1000;
-    
+    if (!paused) {
+      const dt = ts - lastTime;
+      accumulatedTime += dt / 1000;
+    }
+    lastTime = ts; // FIX: always update lastTime when frame processes
+
     orbitData.forEach((orbit, oi) => {
       const duration = CONFIG.baseOrbitDuration + oi * CONFIG.durationIncrement;
-      const angularSpeed = (2 * Math.PI) / duration; 
+      const angularSpeed = (2 * Math.PI) / duration;
       const direction = oi % 2 === 0 ? 1 : -1;
 
       orbit.planets.forEach((follower, pi) => {
@@ -803,7 +796,6 @@ function animate(ts) {
       });
     });
   }
-  lastTime = ts;
 }
 
 // ─── Tooltip ──────────────────────────────────────────────
@@ -812,14 +804,16 @@ function showTooltip(event, follower, orbit) {
   document.getElementById('tt-name').textContent = follower.name;
   document.getElementById('tt-handle').textContent = follower.handle;
   document.getElementById('tt-date').textContent = 'Followed on ' + formatDate(follower.ts);
-  
+  document.getElementById('tt-link').href = follower.href;
+
   const av = document.getElementById('tt-avatar');
   av.src = avatarPlaceholder(follower.name, orbit.color);
   const username = follower.handle.replace('@','');
-  
-  // تحميل صورة الـ Tooltip بشكل مستقل لتكون سريعة للمستخدم
-  let tryAvatar = new Image();
-  tryAvatar.onload = () => { av.src = `https://unavatar.io/threads/${username}`; tryAvatar = null; };
+
+  // FIX: proper cleanup + error handling to prevent memory leaks
+  const tryAvatar = new Image();
+  tryAvatar.onload = () => { av.src = `https://unavatar.io/threads/${username}`; };
+  tryAvatar.onerror = () => { /* keep placeholder */ };
   tryAvatar.src = `https://unavatar.io/threads/${username}`;
 
   moveTooltip(event);
@@ -848,13 +842,12 @@ function setupControls() {
   });
   document.getElementById('btn-pause').addEventListener('click', function() {
     paused = !paused;
+    lastTime = performance.now(); // FIX: reset lastTime when toggling play/pause
     this.textContent = paused ? '▶' : '⏸';
   });
 }
 
 main();
-
-   
 </script>
 </body>
 </html>
