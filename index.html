@@ -586,7 +586,7 @@ async function main() {
 
   let raw;
   try {
-    const res = await fetch('./followers.json');
+    const res = await fetch(`./followers.json?v=${Date.now()}`);
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     raw = await res.json();
   } catch (e) {
@@ -731,8 +731,9 @@ async function processAvatarQueue() {
 
 async function loadAvatarOptimized(follower, imgEl) {
   const username = follower.handle.replace('@','');
-  const url1 = `https://unavatar.io/threads/${username}`;
-  const url2 = `https://unavatar.io/${username}`;
+  const cacheBust = `?t=${Date.now()}`;
+  const url1 = `https://unavatar.io/threads/${username}${cacheBust}`;
+  const url2 = `https://unavatar.io/${username}${cacheBust}`;
 
   try {
     await tryLoadImage(url1);
@@ -814,7 +815,7 @@ function showTooltip(event, follower, orbit) {
   const tryAvatar = new Image();
   tryAvatar.onload = () => { av.src = `https://unavatar.io/threads/${username}`; };
   tryAvatar.onerror = () => { /* keep placeholder */ };
-  tryAvatar.src = `https://unavatar.io/threads/${username}`;
+  tryAvatar.src = `https://unavatar.io/threads/${username}?t=${Date.now()}`;
 
   moveTooltip(event);
   tooltip.classList.add('visible');
